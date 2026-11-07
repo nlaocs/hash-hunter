@@ -2,7 +2,7 @@
 
 Hash Hunter is a CLI for finding palindromes, runs, and repeats in Git commit hashes. It supports SHA-1 and SHA-256 and ranks hashes by rarity, visual structure, or both.
 
-[![Version 0.1.0](https://img.shields.io/badge/version-0.1.0-2563eb)](Cargo.toml) [![Rust 2024](https://img.shields.io/badge/Rust-2024-24292f?logo=rust&logoColor=white)](Cargo.toml) [![MIT License](https://img.shields.io/badge/license-MIT-15803d)](LICENSE)
+[![Version 0.2.0](https://img.shields.io/badge/version-0.2.0-2563eb)](Cargo.toml) [![Rust 2024](https://img.shields.io/badge/Rust-2024-24292f?logo=rust&logoColor=white)](Cargo.toml) [![MIT License](https://img.shields.io/badge/license-MIT-15803d)](LICENSE)
 
 [Features](#features) · [Installation](#installation) · [Usage](#usage) · [Scoring](#scoring) · [Development](#development) · [License](#license)
 
@@ -36,6 +36,19 @@ hash-hunter --repo "path/to/repository" --sort rarity --min-bits 16 --csv findin
 ```
 
 With no `--repo` argument, Hash Hunter uses the repository in the current directory. It runs `git rev-list --all` to read commits reachable from local refs and HEAD.
+
+Terminal results group the position, hash, scores, and scoring reasons for each result. Composite patterns appear on separate lines. `--details` shows features that have not already appeared in either scoring reason. This excerpt comes from a scan of the Linux history.
+
+```text
+#1  23b6ee5cd9d99d9d99d92ff923d6971a33dc7b03
+    Score 40.38   Rarity 31.14 bits   Beauty 77/100
+    Expected 0.000635 hits
+    Rarity (入れ子の複合)
+      - 周期5:d9d99d9d99d9
+      - 回文:9d99d9d99d9
+    Other
+      - 回文:d9d99d9d
+```
 
 CSV rows follow input order and use UTF-8 with a BOM. If the destination exists, Hash Hunter replaces it after the scan and write succeed.
 

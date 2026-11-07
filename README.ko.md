@@ -2,7 +2,7 @@
 
 Hash Hunter는 Git 커밋 해시에서 회문, 같은 문자의 연속, 반복 패턴을 찾는 CLI입니다. SHA-1과 SHA-256을 지원하며 희귀도와 시각적 특징을 바탕으로 순위를 매깁니다.
 
-[![Version 0.1.0](https://img.shields.io/badge/version-0.1.0-2563eb)](Cargo.toml) [![Rust 2024](https://img.shields.io/badge/Rust-2024-24292f?logo=rust&logoColor=white)](Cargo.toml) [![MIT License](https://img.shields.io/badge/license-MIT-15803d)](LICENSE)
+[![Version 0.2.0](https://img.shields.io/badge/version-0.2.0-2563eb)](Cargo.toml) [![Rust 2024](https://img.shields.io/badge/Rust-2024-24292f?logo=rust&logoColor=white)](Cargo.toml) [![MIT License](https://img.shields.io/badge/license-MIT-15803d)](LICENSE)
 
 [특징](#특징) · [설치](#설치) · [사용법](#사용법) · [점수](#점수) · [개발](#개발) · [라이선스](#라이선스)
 
@@ -36,6 +36,19 @@ hash-hunter --repo "path/to/repository" --sort rarity --min-bits 16 --csv findin
 ```
 
 `--repo`를 생략하면 현재 디렉터리의 저장소를 사용합니다. `git rev-list --all`을 실행해 로컬 참조와 HEAD에서 도달할 수 있는 커밋을 읽습니다.
+
+터미널은 결과마다 순위, 해시, 점수, 채점 근거를 모아 표시합니다. 복합 패턴의 각 요소는 줄을 나눠 표시합니다. `--details`는 두 채점 근거에 아직 표시되지 않은 특징을 보여 줍니다. 다음은 Linux 이력을 조사한 출력의 일부입니다.
+
+```text
+#1  23b6ee5cd9d99d9d99d92ff923d6971a33dc7b03
+    Score 40.38   Rarity 31.14 bits   Beauty 77/100
+    Expected 0.000635 hits
+    Rarity (入れ子の複合)
+      - 周期5:d9d99d9d99d9
+      - 回文:9d99d9d99d9
+    Other
+      - 回文:d9d99d9d
+```
 
 CSV 행은 입력 순서대로 기록되며 UTF-8 BOM을 포함합니다. 출력 경로에 기존 파일이 있으면 조사와 쓰기가 성공한 뒤 교체합니다.
 

@@ -2,7 +2,7 @@
 
 Git のコミットハッシュを走査し、回文、ゾロ目、繰り返しなどを見つける CLI です。SHA-1 と SHA-256 に対応し、珍しさと見た目の特徴をもとに順位を付けます。
 
-[![Version 0.1.0](https://img.shields.io/badge/version-0.1.0-2563eb)](Cargo.toml) [![Rust 2024](https://img.shields.io/badge/Rust-2024-24292f?logo=rust&logoColor=white)](Cargo.toml) [![MIT License](https://img.shields.io/badge/license-MIT-15803d)](LICENSE)
+[![Version 0.2.0](https://img.shields.io/badge/version-0.2.0-2563eb)](Cargo.toml) [![Rust 2024](https://img.shields.io/badge/Rust-2024-24292f?logo=rust&logoColor=white)](Cargo.toml) [![MIT License](https://img.shields.io/badge/license-MIT-15803d)](LICENSE)
 
 [特徴](#特徴) · [インストール](#インストール) · [使い方](#使い方) · [スコア](#スコア) · [開発](#開発) · [ライセンス](#ライセンス)
 
@@ -36,6 +36,19 @@ hash-hunter --repo "path/to/repository" --sort rarity --min-bits 16 --csv findin
 ```
 
 `--repo` を省略すると、カレントディレクトリのリポジトリを使います。`git rev-list --all` で、ローカルにある参照と HEAD から到達できるコミットを読み取ります。
+
+端末では1件ごとに順位、ハッシュ、点数、採点理由をまとめて表示します。複合パターンは要素ごとに改行し、`--details` は採点理由に使われていない特徴を表示します。Linux の履歴を調べた出力の抜粋です。
+
+```text
+#1  23b6ee5cd9d99d9d99d92ff923d6971a33dc7b03
+    Score 40.38   Rarity 31.14 bits   Beauty 77/100
+    Expected 0.000635 hits
+    Rarity (入れ子の複合)
+      - 周期5:d9d99d9d99d9
+      - 回文:9d99d9d99d9
+    Other
+      - 回文:d9d99d9d
+```
 
 CSV は入力順に並び、UTF-8 BOM が付きます。出力先に既存ファイルがある場合は、走査と書き込みが成功した時点で置き換えます。
 
