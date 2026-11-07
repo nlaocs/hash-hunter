@@ -1,0 +1,13 @@
+[package]
+name = "hash-hunter"
+version = "0.1.0"
+edition = "2024"
+description = "Find unusual single and composite patterns in Git commit hashes"
+license = "MIT"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
