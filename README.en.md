@@ -37,6 +37,10 @@ hash-hunter --repo "path/to/repository" --sort rarity --min-bits 16 --csv findin
 
 With no `--repo` argument, Hash Hunter uses the repository in the current directory. It runs `git rev-list --all` to read commits reachable from local refs and HEAD.
 
+Progress goes to standard error. `Reading Git history` shows the number of hashes read and elapsed time. `Scoring` shows the percentage, processed count, elapsed time, and estimated time remaining (ETA). The total is unknown during history enumeration, so percentages start when scoring begins.
+
+To obtain an exact total, Hash Hunter saves Git's hash list to a temporary file before scoring it. Git enumerates the history only once, and the temporary file is deleted when closed. A Linux history of about 1.5 million commits uses about 62 MB of temporary storage.
+
 Terminal results group the position, hash, scores, and scoring reasons for each result. Composite patterns appear on separate lines. `--details` shows features that have not already appeared in either scoring reason. This excerpt comes from a scan of the Linux history.
 
 ```text
@@ -59,6 +63,8 @@ Pass one lowercase 40- or 64-digit hexadecimal hash per line to `--stdin`. Both 
 ```powershell
 Get-Content .\hashes.txt | hash-hunter --stdin --threads 8
 ```
+
+`--stdin` scores hashes as it reads them and shows the processed count and elapsed time. Since the total is unknown, it displays 100% only on completion.
 
 ### Explain one score
 

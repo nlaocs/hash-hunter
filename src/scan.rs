@@ -1,10 +1,11 @@
 use std::{
     cmp::{Ordering, Reverse},
     collections::BinaryHeap,
-    io::{self, BufRead, BufReader, Read, Write},
+    fs::File,
+    io::{self, BufRead, BufReader, IsTerminal, Read, Seek, Write},
     path::Path,
     process::{Command, Stdio},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use clap::ValueEnum;
@@ -20,6 +21,93 @@ use crate::{
 
 const BATCH_BYTES: usize = 1 << 20;
 const MAX_LINE_BYTES: usize = 64 + 2;
+
+struct Progress {
+    stage: &'static str,
+    total: Option<u64>,
+    started: Instant,
+    updated: Instant,
+    terminal: bool,
+    line_width: usize,
+}
+
+impl Progress {
+    fn new(stage: &'static str, total: Option<u64>) -> Self {
+        let now = Instant::now();
+        let mut progress = Self {
+            stage,
+            total,
+            started: now,
+            updated: now,
+            terminal: io::stderr().is_terminal(),
+            line_width: 0,
+        };
+        progress.report(0, false);
+        progress
+    }
+
+    fn update(&mut self, completed: u64) {
+        let interval = if self.terminal { 250 } else { 1000 };
+        if self.updated.elapsed() >= Duration::from_millis(interval) {
+            self.report(completed, false);
+        }
+    }
+
+    fn finish(&mut self, completed: u64) {
+        self.total = Some(completed);
+        self.report(completed, true);
+    }
+
+    fn report(&mut self, completed: u64, finished: bool) {
+        let elapsed = self.started.elapsed().as_secs_f64();
+        let status = if let Some(total) = self.total {
+            let percent = if finished {
+                100.0
+            } else if total == 0 {
+                0.0
+            } else {
+                (100.0 * completed as f64 / total as f64).min(99.9)
+            };
+            let remaining = total.saturating_sub(completed);
+            let eta = if finished {
+                "0.0s".into()
+            } else if completed == 0 {
+                "--".into()
+            } else {
+                format!("{:.1}s", elapsed * remaining as f64 / completed as f64)
+            };
+            format!(
+                "{} {percent:5.1}% ({completed}/{total})  {elapsed:.1}s  ETA {eta}",
+                self.stage
+            )
+        } else {
+            format!("{}  {completed} hashes  {elapsed:.1}s", self.stage)
+        };
+        let mut out = io::stderr().lock();
+        // Progress output must not stop a scan if stderr has been closed.
+        if self.terminal {
+            let width = self.line_width.max(status.len());
+            let _ = write!(out, "\r{status:width$}");
+            self.line_width = width;
+            if finished {
+                let _ = writeln!(out);
+                self.line_width = 0;
+            }
+        } else {
+            let _ = writeln!(out, "{status}");
+        }
+        let _ = out.flush();
+        self.updated = Instant::now();
+    }
+}
+
+impl Drop for Progress {
+    fn drop(&mut self) {
+        if self.line_width != 0 {
+            let _ = writeln!(io::stderr().lock());
+        }
+    }
+}
 
 #[derive(Clone, Copy, ValueEnum)]
 pub enum SortBy {
@@ -293,9 +381,10 @@ pub fn run(args: &Args, scorer: &Scorer) -> io::Result<Summary> {
         .build()
         .map_err(io::Error::other)?;
     let mut csv = args.csv.as_deref().map(open_csv).transpose()?;
-    let summary = if args.stdin {
-        scan(io::stdin().lock(), args, scorer, &pool, csv.as_mut())?
+    let (reader, total): (Box<dyn BufRead>, Option<u64>) = if args.stdin {
+        (Box::new(io::stdin().lock()), None)
     } else {
+        let mut progress = Progress::new("Reading Git history", None);
         let mut command = Command::new("git");
         if let Some(path) = &args.repo {
             command.arg("-C").arg(path);
@@ -314,23 +403,47 @@ pub fn run(args: &Args, scorer: &Scorer) -> io::Result<Summary> {
                 )
             })?;
         let reader = BufReader::new(git.stdout.take().expect("piped Git stdout"));
-        let result = scan(reader, args, scorer, &pool, csv.as_mut());
+        let result = snapshot(reader, |count| progress.update(count));
         if result.is_err() {
             let _ = git.kill();
         }
         let status = git.wait();
-        let summary = result?;
+        let (file, total) = result?;
         let status = status?;
         if !status.success() {
             return Err(io::Error::other(format!("git rev-list failed: {status}")));
         }
-        summary
+        progress.finish(total);
+        (Box::new(BufReader::new(file)), Some(total))
     };
+    let mut progress = Progress::new("Scoring", total);
+    let summary = scan(reader, args, scorer, &pool, csv.as_mut(), &mut progress)?;
     if let (Some(csv), Some(path)) = (csv, &args.csv) {
         let temp = csv.into_inner().map_err(|error| error.into_error())?;
         temp.persist(path).map_err(|error| error.error)?;
     }
+    progress.finish(summary.counts.scanned);
     Ok(summary)
+}
+
+fn snapshot(mut reader: impl BufRead, mut report: impl FnMut(u64)) -> io::Result<(File, u64)> {
+    let mut file = tempfile::tempfile()?;
+    let mut batch = Vec::with_capacity(BATCH_BYTES + MAX_LINE_BYTES + 1);
+    let mut total = 0;
+    let mut unterminated = false;
+    loop {
+        read_batch(&mut reader, &mut batch)?;
+        if batch.is_empty() {
+            break;
+        }
+        total += batch.iter().filter(|&&byte| byte == b'\n').count() as u64;
+        unterminated = !batch.ends_with(b"\n");
+        file.write_all(&batch)?;
+        report(total);
+    }
+    total += u64::from(unterminated);
+    file.rewind()?;
+    Ok((file, total))
 }
 
 fn open_csv(path: &Path) -> io::Result<csv::Writer<NamedTempFile>> {
@@ -368,6 +481,7 @@ fn scan(
     scorer: &Scorer,
     pool: &ThreadPool,
     mut csv: Option<&mut csv::Writer<NamedTempFile>>,
+    progress: &mut Progress,
 ) -> io::Result<Summary> {
     let mut summary = Summary {
         counts: Counts::default(),
@@ -421,6 +535,7 @@ fn scan(
                 }
             }
         }
+        progress.update(summary.counts.scanned);
     }
     Ok(summary)
 }
@@ -456,4 +571,28 @@ fn split_batch(mut batch: &[u8], parts: usize) -> Vec<&[u8]> {
         chunks.push(batch);
     }
     chunks
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    #[test]
+    fn snapshot_preserves_line_endings_and_counts_a_final_unterminated_hash() {
+        let short = "d84a73bc621f325500005523d89b6e04f13a2cb8";
+        let long = "0123456789abcdef".repeat(4);
+        for input in [
+            String::new(),
+            format!("{short}\r\n{long}"),
+            format!("{}{long}", format!("{short}\n").repeat(30_000)),
+        ] {
+            let expected = input.lines().count() as u64;
+            let (mut file, count) = snapshot(Cursor::new(input.as_bytes()), |_| {}).unwrap();
+            let mut copied = String::new();
+            file.read_to_string(&mut copied).unwrap();
+            assert_eq!(copied, input);
+            assert_eq!(count, expected);
+        }
+    }
 }

@@ -67,6 +67,9 @@ fn csv_keeps_all_matches_in_input_order_for_mixed_hash_lengths() {
         input.as_bytes(),
     );
     assert!(output.status.success(), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("Scoring  0 hashes"));
+    assert!(stderr.contains("100.0% (2/2)"));
     let data = std::fs::read(path).unwrap();
     let payload = data.strip_prefix(b"\xef\xbb\xbf").unwrap();
     let mut reader = csv::Reader::from_reader(payload);
@@ -165,6 +168,54 @@ fn ranked_results_show_separate_lines_and_only_additional_details() {
 }
 
 #[test]
+fn git_scan_reports_progress_with_a_known_total() {
+    let repo = tempfile::tempdir().unwrap();
+    let init = Command::new("git")
+        .args(["init", "--quiet", "--template="])
+        .arg(repo.path())
+        .output()
+        .unwrap();
+    assert!(init.status.success(), "{init:?}");
+    let empty = binary().arg("--repo").arg(repo.path()).output().unwrap();
+    assert!(empty.status.success(), "{empty:?}");
+    let stderr = String::from_utf8(empty.stderr).unwrap();
+    assert!(stderr.contains("100.0% (0/0)"));
+    assert!(!stderr.contains("NaN"));
+    let commit = Command::new("git")
+        .arg("-C")
+        .arg(repo.path())
+        .args([
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+        ])
+        .arg(format!("core.hooksPath={}", repo.path().display()))
+        .args(["commit", "--allow-empty", "--quiet", "-m", "fixture"])
+        .output()
+        .unwrap();
+    assert!(commit.status.success(), "{commit:?}");
+    let output = binary().arg("--repo").arg(repo.path()).output().unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("Reading Git history"));
+    assert!(
+        stderr
+            .lines()
+            .any(|line| line.starts_with("Scoring ") && line.contains("0.0% (0/1)"))
+    );
+    assert!(
+        stderr
+            .lines()
+            .any(|line| line.starts_with("Scoring ") && line.contains("100.0% (1/1)"))
+    );
+    assert!(!String::from_utf8(output.stdout).unwrap().contains("100.0%"));
+}
+
+#[test]
 fn invalid_line_after_a_batch_preserves_existing_csv() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("findings.csv");
@@ -177,6 +228,7 @@ fn invalid_line_after_a_batch_preserves_existing_csv() {
     );
     assert_eq!(output.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&output.stderr).contains("line 26002"));
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("100.0%"));
     assert_eq!(
         std::fs::read_to_string(&path).unwrap(),
         "previous results\n"
