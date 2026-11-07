@@ -31,6 +31,10 @@ fn rejects_conflicting_modes_and_invalid_values() {
         &["--min-bits", "inf"],
         &["--beauty-weight", "NaN"],
         &["--focus-digits", "F"],
+        &["--columns", "unknown"],
+        &["--columns", ""],
+        &["--columns", "hash", "--details"],
+        &["--columns", "hash", "--explain", FIRST],
     ] {
         let output = binary().args(args).output().unwrap();
         assert_eq!(output.status.code(), Some(2), "{args:?}");
@@ -113,7 +117,10 @@ fn explain_and_csv_show_the_two_scoring_reasons() {
 
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("findings.csv");
-    let output = run_stdin(binary().arg("--csv").arg(&path), hash.as_bytes());
+    let output = run_stdin(
+        binary().args(["--details", "--csv"]).arg(&path),
+        hash.as_bytes(),
+    );
     assert!(output.status.success(), "{output:?}");
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(
@@ -135,24 +142,75 @@ fn explain_and_csv_show_the_two_scoring_reasons() {
 fn expected_is_decimal_and_counts_only_the_same_hash_length() {
     let long = "112290d5a738e77b1e2034bb2830687c91b29c5e1a6f1172ac07b2e4da751122";
     let input = format!("{FIRST}\n{long}\n");
-    let output = run_stdin(binary().args(["--threads", "4"]), input.as_bytes());
+    let output = run_stdin(
+        binary().args(["--threads", "4", "--columns", "expected,hash"]),
+        input.as_bytes(),
+    );
     assert!(output.status.success(), "{output:?}");
     let stdout = String::from_utf8(output.stdout).unwrap();
     for (hash, expected) in [(long, "0.000015"), (FIRST, "<0.000001")] {
-        let block = stdout
-            .split("\n#")
-            .find(|block| block.lines().next().unwrap_or("").contains(hash))
-            .unwrap();
-        assert!(
-            block
-                .lines()
-                .any(|line| line.trim() == format!("Expected {expected} hits"))
+        let line = stdout.lines().find(|line| line.contains(hash)).unwrap();
+        assert_eq!(
+            line.split_whitespace().collect::<Vec<_>>(),
+            [expected, hash]
         );
     }
 }
 
 #[test]
-fn ranked_results_show_separate_lines_and_only_additional_details() {
+fn default_list_keeps_one_line_per_hash_without_extra_beauty_reasons() {
+    let composite = "23b6ee5cd9d99d9d99d92ff923d6971a33dc7b03";
+    let different_beauty = "d84a73bc621f325500005523d89b6e04deadbeef";
+    let input = format!("{composite}\n{different_beauty}\n");
+    let output = run_stdin(&mut binary(), input.as_bytes());
+    assert!(output.status.success(), "{output:?}");
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let rows: Vec<_> = stdout
+        .lines()
+        .skip_while(|line| !line.trim_start().starts_with("Score  "))
+        .collect();
+    assert_eq!(rows.len(), 3, "{stdout}");
+    assert_eq!(
+        rows[0].split_whitespace().collect::<Vec<_>>(),
+        ["Score", "Hash", "Pattern"]
+    );
+    for hash in [composite, different_beauty] {
+        assert_eq!(
+            rows[1..].iter().filter(|line| line.contains(hash)).count(),
+            1
+        );
+    }
+    assert!(!stdout.contains("Beauty"));
+    assert!(!stdout.contains("Expected"));
+    assert!(!stdout.contains("    Other"));
+}
+
+#[test]
+fn columns_select_fields_in_the_requested_order() {
+    let output = run_stdin(
+        binary().args(["--columns", "hash,beauty,score,bits,expected"]),
+        FIRST.as_bytes(),
+    );
+    assert!(output.status.success(), "{output:?}");
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let header = stdout
+        .lines()
+        .find(|line| line.starts_with("Hash "))
+        .unwrap();
+    assert_eq!(
+        header.split_whitespace().collect::<Vec<_>>(),
+        ["Hash", "Beauty", "Score", "Bits", "Expected"]
+    );
+    let row = stdout.lines().find(|line| line.contains(FIRST)).unwrap();
+    assert_eq!(
+        row.split_whitespace().collect::<Vec<_>>(),
+        [FIRST, "94", "34.42", "23.14", "<0.000001"]
+    );
+    assert!(!stdout.contains("回文:"));
+}
+
+#[test]
+fn details_keep_grouped_reasons_and_only_additional_features() {
     let hash = "23b6ee5cd9d99d9d99d92ff923d6971a33dc7b03";
     let output = run_stdin(binary().args(["--top", "1", "--details"]), hash.as_bytes());
     assert!(output.status.success(), "{output:?}");

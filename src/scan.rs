@@ -126,6 +126,41 @@ impl SortBy {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum Column {
+    Score,
+    Bits,
+    Beauty,
+    Expected,
+    Hash,
+    Pattern,
+}
+
+impl Column {
+    fn heading(self) -> &'static str {
+        match self {
+            Self::Score => "Score",
+            Self::Bits => "Bits",
+            Self::Beauty => "Beauty",
+            Self::Expected => "Expected",
+            Self::Hash => "Hash",
+            Self::Pattern => "Pattern",
+        }
+    }
+
+    fn value(self, finding: &Finding, counts: &Counts) -> String {
+        let key = finding.key;
+        match self {
+            Self::Score => format!("{:.2}", key.rank),
+            Self::Bits => format!("{:.2}", key.bits),
+            Self::Beauty => key.beauty.to_string(),
+            Self::Expected => format_expected(counts.expected(key)),
+            Self::Hash => key.hash.to_string(),
+            Self::Pattern => finding.primary.parts.join(" + "),
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 struct Key {
     rank: f64,
@@ -324,39 +359,99 @@ impl Summary {
         if self.top.is_empty() {
             writeln!(out, "\nNo matching hashes.")?;
         }
-        for (index, Reverse(finding)) in self.top.into_sorted_vec().into_iter().enumerate() {
-            let key = finding.key;
-            let expected = format_expected(self.counts.expected(key));
-            writeln!(out, "\n#{}  {}", index + 1, key.hash)?;
-            writeln!(
-                out,
-                "    Score {:.2}   Rarity {:.2} bits   Beauty {}/100",
-                key.rank, key.bits, key.beauty
-            )?;
-            writeln!(out, "    Expected {expected} hits")?;
-            write_explanation(&mut out, "Rarity", &finding.primary)?;
-            if let Some(beauty) = finding
-                .beauty_feature
-                .as_ref()
-                .filter(|&feature| feature != &finding.primary)
-            {
-                write_explanation(&mut out, "Beauty", beauty)?;
-            }
-            if !finding.additional_features.is_empty() {
-                writeln!(out, "    Other")?;
-                for feature in finding.additional_features {
-                    writeln!(out, "      - {feature}")?;
+        let findings = self.top.into_sorted_vec();
+        if args.details {
+            for (index, Reverse(finding)) in findings.into_iter().enumerate() {
+                let key = finding.key;
+                let expected = format_expected(self.counts.expected(key));
+                writeln!(out, "\n#{}  {}", index + 1, key.hash)?;
+                writeln!(
+                    out,
+                    "    Score {:.2}   Rarity {:.2} bits   Beauty {}/100",
+                    key.rank, key.bits, key.beauty
+                )?;
+                writeln!(out, "    Expected {expected} hits")?;
+                write_explanation(&mut out, "Rarity", &finding.primary)?;
+                if let Some(beauty) = finding
+                    .beauty_feature
+                    .as_ref()
+                    .filter(|&feature| feature != &finding.primary)
+                {
+                    write_explanation(&mut out, "Beauty", beauty)?;
+                }
+                if !finding.additional_features.is_empty() {
+                    writeln!(out, "    Other")?;
+                    for feature in finding.additional_features {
+                        writeln!(out, "      - {feature}")?;
+                    }
                 }
             }
+        } else if !findings.is_empty() {
+            write_table(&mut out, &findings, &self.counts, &args.columns)?;
         }
         if let Some(path) = &args.csv {
             writeln!(out, "\nCSV saved to {}", path.display())?;
         }
-        writeln!(
-            out,
-            "\nExpected is a bound for the shown pattern family.\nIt uses the number of scanned hashes of the same length."
-        )
+        if args.details || args.columns.contains(&Column::Expected) {
+            writeln!(
+                out,
+                "\nExpected is a bound for the shown pattern family.\nIt uses the number of scanned hashes of the same length."
+            )?;
+        }
+        Ok(())
     }
+}
+
+fn write_table(
+    mut out: impl Write,
+    findings: &[Reverse<Finding>],
+    counts: &Counts,
+    columns: &[Column],
+) -> io::Result<()> {
+    let rows: Vec<Vec<String>> = findings
+        .iter()
+        .map(|Reverse(finding)| {
+            columns
+                .iter()
+                .map(|column| column.value(finding, counts))
+                .collect()
+        })
+        .collect();
+    let header: Vec<String> = columns
+        .iter()
+        .map(|column| column.heading().into())
+        .collect();
+    let widths: Vec<_> = columns
+        .iter()
+        .enumerate()
+        .map(|(index, column)| {
+            if *column == Column::Pattern {
+                0
+            } else {
+                rows.iter()
+                    .map(|row| row[index].len())
+                    .max()
+                    .unwrap_or(0)
+                    .max(header[index].len())
+            }
+        })
+        .collect();
+    writeln!(out)?;
+    for row in std::iter::once(header).chain(rows) {
+        for (index, value) in row.iter().enumerate() {
+            if index != 0 {
+                write!(out, "  ")?;
+            }
+            let width = widths[index];
+            if columns[index] == Column::Hash {
+                write!(out, "{value:<width$}")?;
+            } else {
+                write!(out, "{value:>width$}")?;
+            }
+        }
+        writeln!(out)?;
+    }
+    Ok(())
 }
 
 fn write_explanation(

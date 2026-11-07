@@ -31,7 +31,7 @@ cargo install --path . --locked
 ### Git 履歴を調べる
 
 ```sh
-hash-hunter --repo "path/to/repository" --top 100 --details
+hash-hunter --repo "path/to/repository" --top 100
 hash-hunter --repo "path/to/repository" --sort rarity --min-bits 16 --csv findings.csv
 ```
 
@@ -41,7 +41,23 @@ hash-hunter --repo "path/to/repository" --sort rarity --min-bits 16 --csv findin
 
 正確な総件数を得るため、Git が列挙したハッシュを一時ファイルに保存してから採点します。Git の列挙は1回だけで、一時ファイルは閉じると削除されます。約150万コミットの Linux 履歴では約62 MBの一時領域を使います。
 
-端末では1件ごとに順位、ハッシュ、点数、採点理由をまとめて表示します。複合パターンは要素ごとに改行し、`--details` は採点理由に使われていない特徴を表示します。Linux の履歴を調べた出力の抜粋です。
+通常は1件1行で、点数、ハッシュ、主なパターンを表示します。Beauty の補足や追加の特徴は別行に挟みません。Linux の履歴を調べた出力の抜粋です。
+
+```text
+Score  Hash                                      Pattern
+40.38  23b6ee5cd9d99d9d99d92ff923d6971a33dc7b03  周期5:d9d99d9d99d9 + 回文:9d99d9d99d9
+38.92  5f5837d2d650db25b9153b91535e67a96b265f58  周期5:b9153b9153 + 先頭=末尾:5f58
+```
+
+`--columns` で表示項目と順序を指定できます。`score`、`bits`、`beauty`、`expected`、`hash`、`pattern` をカンマ区切りで選びます。表示項目を変えても採点や順位付けは変わりません。
+
+```sh
+hash-hunter --repo "path/to/repository" --columns score,hash
+hash-hunter --repo "path/to/repository" --columns score,bits,beauty,expected,hash,pattern
+hash-hunter --repo "path/to/repository" --details
+```
+
+`--details` は1件ごとに点数と詳しい採点理由をまとめる複数行の表示です。複合パターンは要素ごとに改行し、採点理由に使われていない特徴も表示します。`--columns` と同時には指定できません。
 
 ```text
 #1  23b6ee5cd9d99d9d99d92ff923d6971a33dc7b03
@@ -97,7 +113,8 @@ Placements   : 29 (log2=4.858)
 | `--sort MODE` | `rarity`・`beauty`・`hybrid` から順位付けを選択 | `hybrid` |
 | `--beauty-weight X` | Hybrid の Beauty に掛ける係数 | 0.12 |
 | `--focus-digits HEX` | 指定した文字のゾロ目を別のパターン族として採点 | 指定なし |
-| `--details` | 上位結果に追加の候補も表示 | — |
+| `--columns FIELDS` | 一覧の表示項目と順序をカンマ区切りで指定 | `score,hash,pattern` |
+| `--details` | 点数、採点理由、追加の特徴を複数行で詳しく表示 | — |
 | `--csv PATH` | しきい値を満たした全件を CSV に保存 | — |
 | `--help` / `--version` | ヘルプまたはバージョンを表示 | — |
 
@@ -114,7 +131,7 @@ git -C "path/to/repository" commit-graph write --reachable
 ## スコア
 
 - **Rarity** は、パターン族の出現確率の上限を `q` として `-log2(q)` bits で表します。計算では、16進各桁を独立な一様乱数と仮定します。離れたペアでは互いに重ならない配置を数え、同じ族同士の組は一度ずつ数えます。重なる複合では相対位置を固定し、その位置関係で両立する辞書語や連番の組を数えます。
-- **Beauty** は、長さや対称性などから求める0〜100の点数です。重なる同種の特徴は一つの見た目として扱います。Rarity と Beauty はそれぞれ最大になる候補を選びます。端末では採点理由が異なる場合に両方を表示し、CSV では `primary` が Rarity の理由、`beauty_feature` が Beauty の理由です。`composite` は Rarity の理由が複合かを示します。
+- **Beauty** は、長さや対称性などから求める0〜100の点数です。重なる同種の特徴は一つの見た目として扱います。Rarity と Beauty はそれぞれ最大になる候補を選びます。`--details` と `--explain` は採点理由が異なる場合に両方を表示し、CSV では `primary` が Rarity の理由、`beauty_feature` が Beauty の理由です。`composite` は Rarity の理由が複合かを示します。
 - **Hybrid** は `Rarity + beauty-weight × Beauty` です。同点の順位は Rarity、Beauty、ハッシュの辞書順を順に降順で比較します。
 - **Expected** は、表示したパターン族の期待件数の上限です。同じ桁数の走査件数に `2^(-Rarity)` を掛け、小数で表示します。100万分の1件より小さい値は `<0.000001` と表示します。
 
