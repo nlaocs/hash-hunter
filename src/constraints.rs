@@ -71,6 +71,14 @@ pub fn joint_bits(hash_len: usize, patterns: &[Pattern]) -> f64 {
         }
     }
 
+    let equality_bits = 4.0 * f64::from(sets.joins);
+    if patterns.iter().all(|pattern| {
+        pattern.run_domain == u16::MAX
+            && !matches!(pattern.kind, Kind::Word | Kind::Sequence { .. })
+    }) {
+        return equality_bits;
+    }
+
     let roots = std::array::from_fn(|i| sets.root(i));
     let mut domains = [u16::MAX; 64];
     for pattern in patterns {
@@ -86,7 +94,7 @@ pub fn joint_bits(hash_len: usize, patterns: &[Pattern]) -> f64 {
         fraction > 0.0,
         "the detected layout has at least one compatible assignment"
     );
-    4.0 * f64::from(sets.joins) - fraction.log2()
+    equality_bits - fraction.log2()
 }
 
 fn compatible_fraction(patterns: &[Pattern], roots: &[u8; 64], domains: &[u16; 64]) -> f64 {
