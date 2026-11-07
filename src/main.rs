@@ -1,26 +1,55 @@
 mod constraints;
 mod hash;
 mod pattern;
+mod scan;
 mod score;
 
 use std::{
-    io::{self, Write},
+    io::{self, BufWriter, Write},
+    path::PathBuf,
     process::ExitCode,
+    thread,
+    time::Instant,
 };
 
 use clap::Parser;
 
 use crate::{
     hash::{FocusDigits, ObjectId},
+    scan::SortBy,
     score::Scorer,
 };
 
 #[derive(Parser)]
 #[command(version, about)]
 struct Args {
+    /// Read Git history from PATH (defaults to the current directory)
+    #[arg(long, value_name = "PATH", conflicts_with = "stdin")]
+    repo: Option<PathBuf>,
+
+    /// Read lowercase 40- or 64-digit hashes from standard input, one per line
+    #[arg(long)]
+    stdin: bool,
+
     /// Explain the score for one 40- or 64-digit hash
-    #[arg(long, value_name = "HASH")]
-    explain: ObjectId,
+    #[arg(long, value_name = "HASH", conflicts_with_all = ["repo", "stdin"])]
+    explain: Option<ObjectId>,
+
+    /// Number of scoring threads
+    #[arg(long, default_value_t = default_threads(), value_parser = clap::value_parser!(u8).range(1..=64))]
+    threads: u8,
+
+    /// Number of ranked results to print
+    #[arg(long, default_value_t = 50, value_parser = clap::value_parser!(u32).range(1..=100_000))]
+    top: u32,
+
+    /// Minimum Rarity in bits
+    #[arg(long, default_value_t = 12.0, value_parser = parse_min_bits)]
+    min_bits: f64,
+
+    /// Score used to rank results
+    #[arg(long, value_enum, default_value = "hybrid")]
+    sort: SortBy,
 
     /// Weight of Beauty in the Hybrid score
     #[arg(long, default_value_t = 0.12, value_parser = parse_weight)]
@@ -29,6 +58,27 @@ struct Args {
     /// Preselect digits for the focused-run pattern family
     #[arg(long, default_value = "", value_name = "HEX")]
     focus_digits: FocusDigits,
+
+    /// Save every match to a UTF-8 CSV file with BOM
+    #[arg(long, value_name = "PATH")]
+    csv: Option<PathBuf>,
+
+    /// Show additional detected features for each ranked result
+    #[arg(long)]
+    details: bool,
+}
+
+fn default_threads() -> u8 {
+    thread::available_parallelism().map_or(1, |count| count.get().min(8) as u8)
+}
+
+fn parse_min_bits(text: &str) -> Result<f64, String> {
+    let value = text.parse::<f64>().map_err(|error| error.to_string())?;
+    if value.is_finite() && value >= 0.0 {
+        Ok(value)
+    } else {
+        Err("expected a finite non-negative value".into())
+    }
 }
 
 fn parse_weight(text: &str) -> Result<f64, String> {
@@ -84,15 +134,21 @@ fn explain(mut out: impl Write, hash: &ObjectId, scorer: &Scorer, weight: f64) -
     )
 }
 
-fn main() -> ExitCode {
-    let args = Args::parse();
+fn run(args: &Args) -> io::Result<()> {
+    let started = Instant::now();
     let scorer = Scorer::new(args.focus_digits);
-    match explain(
-        io::stdout().lock(),
-        &args.explain,
-        &scorer,
-        args.beauty_weight,
-    ) {
+    let mut out = BufWriter::new(io::stdout().lock());
+    if let Some(hash) = &args.explain {
+        explain(&mut out, hash, &scorer, args.beauty_weight)?;
+    } else {
+        let summary = scan::run(args, &scorer)?;
+        summary.write(&mut out, args, started.elapsed())?;
+    }
+    out.flush()
+}
+
+fn main() -> ExitCode {
+    match run(&Args::parse()) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("Error: {error}");

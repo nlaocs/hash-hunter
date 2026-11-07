@@ -281,20 +281,20 @@ fn border(digits: &[u8]) -> Option<Pattern> {
 }
 
 fn equal_positions(digits: &[u8], distance: usize) -> u64 {
-    let mut left = digits[..digits.len() - distance].chunks_exact(8);
-    let mut right = digits[distance..].chunks_exact(8);
+    let (left, left_tail) = digits[..digits.len() - distance].as_chunks::<8>();
+    let (right, right_tail) = digits[distance..].as_chunks::<8>();
     let mut positions = 0;
-    for (index, (a, b)) in left.by_ref().zip(right.by_ref()).enumerate() {
-        let a = u64::from_le_bytes(a.try_into().expect("eight digits"));
-        let b = u64::from_le_bytes(b.try_into().expect("eight digits"));
+    for (index, (&a, &b)) in left.iter().zip(right).enumerate() {
+        let a = u64::from_le_bytes(a);
+        let b = u64::from_le_bytes(b);
         // Nibbles have no high bits. Adding 0x7f per byte sets the high bit
         // exactly where the XOR is nonzero, without a carry between bytes.
         let equal_bytes = !((a ^ b) + 0x7f7f_7f7f_7f7f_7f7f) & 0x8080_8080_8080_8080;
         let bits = equal_bytes.wrapping_mul(0x0002_0408_1020_4081) >> 56;
         positions |= bits << (index * 8);
     }
-    let tail = left.remainder().iter().zip(right.remainder());
-    let start = (digits.len() - distance) / 8 * 8;
+    let tail = left_tail.iter().zip(right_tail);
+    let start = left.len() * 8;
     for (index, (a, b)) in tail.enumerate() {
         positions |= u64::from(a == b) << (start + index);
     }

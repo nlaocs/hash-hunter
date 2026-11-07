@@ -283,10 +283,10 @@ impl Scorer {
         } else {
             None
         };
-        if let Some(category) = category {
-            if best.is_none_or(|previous| category.bits() > previous.bits()) {
-                best = Some(category);
-            }
+        if let Some(category) = category
+            && best.is_none_or(|previous| category.bits() > previous.bits())
+        {
+            best = Some(category);
         }
         best
     }
