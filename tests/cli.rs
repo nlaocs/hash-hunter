@@ -91,6 +91,19 @@ fn csv_keeps_all_matches_in_input_order_for_mixed_hash_lengths() {
 }
 
 #[test]
+fn expected_is_decimal_and_counts_only_the_same_hash_length() {
+    let long = "112290d5a738e77b1e2034bb2830687c91b29c5e1a6f1172ac07b2e4da751122";
+    let input = format!("{FIRST}\n{long}\n");
+    let output = run_stdin(binary().args(["--threads", "4"]), input.as_bytes());
+    assert!(output.status.success(), "{output:?}");
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    for (hash, expected) in [(long, "0.000015"), (FIRST, "<0.000001")] {
+        let row = stdout.lines().find(|line| line.contains(hash)).unwrap();
+        assert_eq!(row.split_whitespace().nth(3), Some(expected));
+    }
+}
+
+#[test]
 fn invalid_line_after_a_batch_preserves_existing_csv() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("findings.csv");

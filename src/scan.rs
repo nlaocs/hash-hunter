@@ -106,8 +106,29 @@ impl Finding {
 #[derive(Default)]
 struct Counts {
     scanned: u64,
+    scanned64: u64,
     matched: u64,
     composite: u64,
+}
+
+impl Counts {
+    fn expected(&self, key: Key) -> f64 {
+        let count = if key.hash.digits().len() == 64 {
+            self.scanned64
+        } else {
+            self.scanned - self.scanned64
+        };
+        count as f64 * 2.0f64.powf(-key.bits)
+    }
+}
+
+fn format_expected(value: f64) -> String {
+    if value < 0.000001 {
+        return "<0.000001".into();
+    }
+    let decimals = if value < 1.0 { 6 } else { 2 };
+    let decimal = format!("{value:.decimals$}");
+    decimal.trim_end_matches('0').trim_end_matches('.').into()
 }
 
 #[derive(Default)]
@@ -131,6 +152,7 @@ impl Worker {
             let line = line.strip_suffix(b"\r").unwrap_or(line);
             let hash = ObjectId::parse(line).map_err(|error| (index, error))?;
             counts.scanned += 1;
+            counts.scanned64 += u64::from(line.len() == 64);
             let Some(result) = scorer.analyze(&hash, &mut self.patterns) else {
                 continue;
             };
@@ -198,17 +220,17 @@ impl Summary {
         }
         writeln!(
             out,
-            "\n{:>7} {:>7} {:>6} {:>9}  {:<40}  Pattern",
+            "\n{:>7} {:>7} {:>6} {:>10}  {:<40}  Pattern",
             "Rank", "Bits", "Beauty", "Expected", "Hash"
         )?;
         for Reverse(finding) in self.top.into_sorted_vec() {
             let key = finding.key;
-            let expected = self.counts.scanned as f64 * 2.0f64.powf(-key.bits);
+            let expected = format_expected(self.counts.expected(key));
             let marker = if finding.composite { "[C] " } else { "" };
             writeln!(
                 out,
-                "{:>7.2} {:>7.2} {:>6} {:>9.2e}  {}  {marker}{}",
-                key.rank, key.bits, key.beauty, expected, key.hash, finding.primary
+                "{:>7.2} {:>7.2} {:>6} {expected:>10}  {}  {marker}{}",
+                key.rank, key.bits, key.beauty, key.hash, finding.primary
             )?;
             if args.details && !finding.features.is_empty() {
                 writeln!(out, "    └─ {}", finding.features)?;
@@ -219,7 +241,7 @@ impl Summary {
         }
         writeln!(
             out,
-            "\nRarity and Expected are estimates for the reported pattern family."
+            "\nExpected estimates the number of hits for the reported family among hashes of the same length."
         )
     }
 }
@@ -339,6 +361,7 @@ fn scan(
                 io::Error::new(io::ErrorKind::InvalidData, format!("line {line}: {error}"))
             })?;
             summary.counts.scanned += counts.scanned;
+            summary.counts.scanned64 += counts.scanned64;
             summary.counts.matched += counts.matched;
             summary.counts.composite += counts.composite;
         }
