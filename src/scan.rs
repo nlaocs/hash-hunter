@@ -15,7 +15,7 @@ use crate::{
     Args,
     hash::{InvalidId, ObjectId},
     pattern::Pattern,
-    score::Scorer,
+    score::{Explanation, Scorer},
 };
 
 const BATCH_BYTES: usize = 1 << 20;
@@ -59,9 +59,10 @@ impl Key {
 struct Finding {
     key: Key,
     composite: bool,
-    primary: String,
+    primary: Explanation,
     features: String,
-    beauty_feature: Option<String>,
+    beauty_feature: Option<Explanation>,
+    additional_features: Vec<String>,
 }
 
 impl Ord for Finding {
@@ -90,6 +91,12 @@ impl Finding {
         let bits = format!("{:.4}", self.key.bits);
         let beauty = self.key.beauty.to_string();
         let hash = self.key.hash.to_string();
+        let primary = self.primary.to_string();
+        let beauty_feature = self
+            .beauty_feature
+            .as_ref()
+            .map(ToString::to_string)
+            .unwrap_or_default();
         writer
             .write_record([
                 rank.as_str(),
@@ -97,9 +104,9 @@ impl Finding {
                 &beauty,
                 if self.composite { "true" } else { "false" },
                 &hash,
-                &self.primary,
+                &primary,
                 &self.features,
-                self.beauty_feature.as_deref().unwrap_or(""),
+                &beauty_feature,
             ])
             .map_err(io::Error::other)
     }
@@ -180,10 +187,15 @@ impl Worker {
                 composite,
                 primary: result.primary(&text),
                 beauty_feature: result.beauty_feature(&text),
-                features: if save_csv || args.details {
+                features: if save_csv {
                     result.details(&text)
                 } else {
                     String::new()
+                },
+                additional_features: if args.details {
+                    result.additional_features(&text)
+                } else {
+                    Vec::new()
                 },
             });
         }
@@ -221,29 +233,32 @@ impl Summary {
         if args.focus_digits.count() != 0 {
             writeln!(out, "Focus digits        : {}", args.focus_digits)?;
         }
-        writeln!(
-            out,
-            "\n{:>7} {:>7} {:>6} {:>10}  {:<40}  Rarity pattern",
-            "Rank", "Bits", "Beauty", "Expected", "Hash"
-        )?;
-        for Reverse(finding) in self.top.into_sorted_vec() {
+        if self.top.is_empty() {
+            writeln!(out, "\nNo matching hashes.")?;
+        }
+        for (index, Reverse(finding)) in self.top.into_sorted_vec().into_iter().enumerate() {
             let key = finding.key;
             let expected = format_expected(self.counts.expected(key));
-            let marker = if finding.composite { "[C] " } else { "" };
+            writeln!(out, "\n#{}  {}", index + 1, key.hash)?;
             writeln!(
                 out,
-                "{:>7.2} {:>7.2} {:>6} {expected:>10}  {}  {marker}{}",
-                key.rank, key.bits, key.beauty, key.hash, finding.primary
+                "    Score {:.2}   Rarity {:.2} bits   Beauty {}/100",
+                key.rank, key.bits, key.beauty
             )?;
+            writeln!(out, "    Expected {expected} hits")?;
+            write_explanation(&mut out, "Rarity", &finding.primary)?;
             if let Some(beauty) = finding
                 .beauty_feature
-                .as_deref()
-                .filter(|&feature| feature != finding.primary)
+                .as_ref()
+                .filter(|&feature| feature != &finding.primary)
             {
-                writeln!(out, "    Beauty  {beauty}")?;
+                write_explanation(&mut out, "Beauty", beauty)?;
             }
-            if args.details && !finding.features.is_empty() {
-                writeln!(out, "    └─ {}", finding.features)?;
+            if !finding.additional_features.is_empty() {
+                writeln!(out, "    Other")?;
+                for feature in finding.additional_features {
+                    writeln!(out, "      - {feature}")?;
+                }
             }
         }
         if let Some(path) = &args.csv {
@@ -251,8 +266,24 @@ impl Summary {
         }
         writeln!(
             out,
-            "\nExpected gives an approximate upper bound for the reported family among hashes of the same length."
+            "\nExpected is a bound for the shown pattern family.\nIt uses the number of scanned hashes of the same length."
         )
+    }
+}
+
+fn write_explanation(
+    mut out: impl Write,
+    title: &str,
+    explanation: &Explanation,
+) -> io::Result<()> {
+    if let Some(relation) = explanation.relation {
+        writeln!(out, "    {title} ({relation})")?;
+        for part in &explanation.parts {
+            writeln!(out, "      - {part}")?;
+        }
+        Ok(())
+    } else {
+        writeln!(out, "    {title}  {}", explanation.parts[0])
     }
 }
 

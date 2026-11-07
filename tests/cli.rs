@@ -116,7 +116,7 @@ fn explain_and_csv_show_the_two_scoring_reasons() {
     assert!(
         stdout
             .lines()
-            .any(|line| line.trim_start().starts_with("Beauty  ") && line.contains("中心対称"))
+            .any(|line| line.trim_start().starts_with("Beauty (") && line.contains("中心対称"))
     );
     let row = csv::Reader::from_path(path)
         .unwrap()
@@ -136,9 +136,32 @@ fn expected_is_decimal_and_counts_only_the_same_hash_length() {
     assert!(output.status.success(), "{output:?}");
     let stdout = String::from_utf8(output.stdout).unwrap();
     for (hash, expected) in [(long, "0.000015"), (FIRST, "<0.000001")] {
-        let row = stdout.lines().find(|line| line.contains(hash)).unwrap();
-        assert_eq!(row.split_whitespace().nth(3), Some(expected));
+        let block = stdout
+            .split("\n#")
+            .find(|block| block.lines().next().unwrap_or("").contains(hash))
+            .unwrap();
+        assert!(
+            block
+                .lines()
+                .any(|line| line.trim() == format!("Expected {expected} hits"))
+        );
     }
+}
+
+#[test]
+fn ranked_results_show_separate_lines_and_only_additional_details() {
+    let hash = "23b6ee5cd9d99d9d99d92ff923d6971a33dc7b03";
+    let output = run_stdin(binary().args(["--top", "1", "--details"]), hash.as_bytes());
+    assert!(output.status.success(), "{output:?}");
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains(&format!("#1  {hash}\n")));
+    assert!(stdout.contains("    Score 40.38   Rarity 31.14 bits   Beauty 77/100\n"));
+    assert!(stdout.contains(
+        "    Rarity (入れ子の複合)\n      - 周期5:d9d99d9d99d9\n      - 回文:9d99d9d99d9\n"
+    ));
+    assert!(stdout.contains("    Other\n      - 回文:d9d99d9d\n"));
+    assert_eq!(stdout.matches("周期5:d9d99d9d99d9").count(), 1);
+    assert_eq!(stdout.matches("回文:9d99d9d99d9").count(), 1);
 }
 
 #[test]
