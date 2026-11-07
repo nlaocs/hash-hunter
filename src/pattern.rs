@@ -126,6 +126,8 @@ impl Detector {
     fn runs_and_repeats(&self, digits: &[u8], patterns: &mut Vec<Pattern>) {
         for period in 1..=8 {
             let mut equal = equal_positions(digits, period);
+            // A run needs three equalities, and shorter period-2 repeats
+            // fall below the rarity threshold for either hash length.
             if equal & (equal >> 1) & (equal >> 2) == 0 {
                 continue;
             }
@@ -290,6 +292,7 @@ fn equal_positions(digits: &[u8], distance: usize) -> u64 {
         // Nibbles have no high bits. Adding 0x7f per byte sets the high bit
         // exactly where the XOR is nonzero, without a carry between bytes.
         let equal_bytes = !((a ^ b) + 0x7f7f_7f7f_7f7f_7f7f) & 0x8080_8080_8080_8080;
+        // Pack the high bit of each byte into consecutive bits.
         let bits = equal_bytes.wrapping_mul(0x0002_0408_1020_4081) >> 56;
         positions |= bits << (index * 8);
     }
