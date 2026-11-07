@@ -80,6 +80,10 @@ impl FocusDigits {
     pub fn count(self) -> u32 {
         self.0.count_ones()
     }
+
+    pub fn mask(self) -> u16 {
+        self.0
+    }
 }
 
 impl FromStr for FocusDigits {

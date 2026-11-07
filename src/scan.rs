@@ -61,6 +61,7 @@ struct Finding {
     composite: bool,
     primary: String,
     features: String,
+    beauty_feature: Option<String>,
 }
 
 impl Ord for Finding {
@@ -98,6 +99,7 @@ impl Finding {
                 &hash,
                 &self.primary,
                 &self.features,
+                self.beauty_feature.as_deref().unwrap_or(""),
             ])
             .map_err(io::Error::other)
     }
@@ -177,6 +179,7 @@ impl Worker {
                 key,
                 composite,
                 primary: result.primary(&text),
+                beauty_feature: result.beauty_feature(&text),
                 features: if save_csv || args.details {
                     result.details(&text)
                 } else {
@@ -220,7 +223,7 @@ impl Summary {
         }
         writeln!(
             out,
-            "\n{:>7} {:>7} {:>6} {:>10}  {:<40}  Pattern",
+            "\n{:>7} {:>7} {:>6} {:>10}  {:<40}  Rarity pattern",
             "Rank", "Bits", "Beauty", "Expected", "Hash"
         )?;
         for Reverse(finding) in self.top.into_sorted_vec() {
@@ -232,6 +235,13 @@ impl Summary {
                 "{:>7.2} {:>7.2} {:>6} {expected:>10}  {}  {marker}{}",
                 key.rank, key.bits, key.beauty, key.hash, finding.primary
             )?;
+            if let Some(beauty) = finding
+                .beauty_feature
+                .as_deref()
+                .filter(|&feature| feature != finding.primary)
+            {
+                writeln!(out, "    Beauty  {beauty}")?;
+            }
             if args.details && !finding.features.is_empty() {
                 writeln!(out, "    └─ {}", finding.features)?;
             }
@@ -241,7 +251,7 @@ impl Summary {
         }
         writeln!(
             out,
-            "\nExpected estimates the number of hits for the reported family among hashes of the same length."
+            "\nExpected gives an approximate upper bound for the reported family among hashes of the same length."
         )
     }
 }
@@ -315,6 +325,7 @@ fn open_csv(path: &Path) -> io::Result<csv::Writer<NamedTempFile>> {
             "hash",
             "primary",
             "features",
+            "beauty_feature",
         ])
         .map_err(io::Error::other)?;
     Ok(writer)

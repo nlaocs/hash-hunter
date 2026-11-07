@@ -1,45 +1,53 @@
-use crate::pattern::{Kind, Pattern};
+use crate::hash::digit;
+use crate::pattern::{Kind, Pattern, WORDS, position_mask};
 
-pub fn fixed_bits(digits: &[u8], patterns: &[Pattern]) -> f64 {
-    let mut used = 0;
-    let mut disjoint = true;
-    for pattern in patterns {
-        let span = u64::MAX >> (64 - pattern.len);
-        let occupied = if pattern.kind == Kind::Border {
-            span | (span << (digits.len() - pattern.len))
-        } else {
-            span << pattern.start
-        };
-        disjoint &= used & occupied == 0;
-        used |= occupied;
+pub fn disjoint_placements(hash_len: usize, mut left: Pattern, mut right: Pattern) -> u32 {
+    if right.kind == Kind::Border {
+        std::mem::swap(&mut left, &mut right);
     }
-    if disjoint {
-        return patterns.iter().map(|pattern| pattern.fixed_bits).sum();
-    }
+    debug_assert_ne!(right.kind, Kind::Border);
 
-    // Subtract each observed digit modulo 16. Every detected equality or
-    // difference then relates two equal offsets, and fixed digits allow 0.
+    let overlapping_starts = |start: usize| {
+        let first = start.saturating_sub(right.len - 1);
+        position_mask(first, start + left.len - first)
+    };
+    let mut starts = left.starts;
+    let mut count = 0;
+    while starts != 0 {
+        let start = starts.trailing_zeros() as usize;
+        starts &= starts - 1;
+        let mut forbidden = overlapping_starts(start);
+        if left.kind == Kind::Border {
+            forbidden |= overlapping_starts(hash_len - left.len);
+        }
+        count += (right.starts & !forbidden).count_ones();
+    }
+    if left.same_family(right) {
+        count / 2
+    } else {
+        count
+    }
+}
+
+pub fn translations(patterns: &[Pattern]) -> u32 {
+    let first = patterns.iter().map(|pattern| pattern.start).min().unwrap();
+    patterns
+        .iter()
+        .fold(u64::MAX, |positions, pattern| {
+            positions & (pattern.starts >> (pattern.start - first))
+        })
+        .count_ones()
+}
+
+pub fn joint_bits(hash_len: usize, patterns: &[Pattern]) -> f64 {
     let mut sets = Components::new();
     for &pattern in patterns {
         let start = pattern.start;
         let end = pattern.end();
         match pattern.kind {
-            Kind::Run | Kind::FocusedRun | Kind::Sequence { .. } => {
+            Kind::Run => {
                 for position in start + 1..end {
                     sets.join(start, position);
-                }
-                match pattern.kind {
-                    Kind::FocusedRun => sets.restrict(start, 1),
-                    Kind::Sequence { ascending } => {
-                        let low = u16::MAX >> (pattern.len - 1);
-                        let allowed = if ascending {
-                            low
-                        } else {
-                            low << (pattern.len - 1)
-                        };
-                        sets.restrict(start, allowed.rotate_right(u32::from(digits[start])));
-                    }
-                    _ => {}
                 }
             }
             Kind::Repeat(period) => {
@@ -52,25 +60,94 @@ pub fn fixed_bits(digits: &[u8], patterns: &[Pattern]) -> f64 {
                     sets.join(start + offset, end - 1 - offset);
                 }
             }
-            Kind::Word => {
-                for position in start..end {
-                    sets.restrict(position, 1);
-                }
-            }
             Kind::Border => {
+                // A border links two blocks, with the second ending at the hash boundary.
+                let second = hash_len - pattern.len;
                 for offset in 0..pattern.len {
-                    sets.join(offset, digits.len() - pattern.len + offset);
+                    sets.join(offset, second + offset);
                 }
             }
+            Kind::Word | Kind::Sequence { .. } => {}
         }
     }
-    sets.bits(digits.len())
+
+    let roots = std::array::from_fn(|i| sets.root(i));
+    let mut domains = [u16::MAX; 64];
+    for pattern in patterns {
+        if pattern.kind == Kind::Run {
+            domains[usize::from(roots[pattern.start])] &= pattern.run_domain;
+        }
+    }
+
+    // At this placement, distinct assignments for any word or sequence
+    // are disjoint events. Sum the compatible assignments' probabilities.
+    let fraction = compatible_fraction(patterns, &roots, &domains);
+    debug_assert!(
+        fraction > 0.0,
+        "the detected layout has at least one compatible assignment"
+    );
+    4.0 * f64::from(sets.joins) - fraction.log2()
+}
+
+fn compatible_fraction(patterns: &[Pattern], roots: &[u8; 64], domains: &[u16; 64]) -> f64 {
+    let Some((&pattern, rest)) = patterns.split_first() else {
+        return domains
+            .iter()
+            .filter(|&&domain| domain != u16::MAX)
+            .map(|domain| f64::from(domain.count_ones()) / 16.0)
+            .product();
+    };
+    match pattern.kind {
+        Kind::Word => WORDS
+            .iter()
+            .filter(|word| word.len() == pattern.len)
+            .map(|word| {
+                let values = word
+                    .bytes()
+                    .map(|byte| digit(byte).expect("hex dictionary"));
+                literal_fraction(pattern.start, values, rest, roots, *domains)
+            })
+            .sum(),
+        Kind::Sequence { .. } => {
+            let mut fraction = 0.0;
+            for ascending in [true, false] {
+                for low in 0..=16 - pattern.len {
+                    let values = (0..pattern.len).map(|offset| {
+                        (low + if ascending {
+                            offset
+                        } else {
+                            pattern.len - 1 - offset
+                        }) as u8
+                    });
+                    fraction += literal_fraction(pattern.start, values, rest, roots, *domains);
+                }
+            }
+            fraction
+        }
+        _ => compatible_fraction(rest, roots, domains),
+    }
+}
+
+fn literal_fraction(
+    start: usize,
+    values: impl Iterator<Item = u8>,
+    rest: &[Pattern],
+    roots: &[u8; 64],
+    mut domains: [u16; 64],
+) -> f64 {
+    for (offset, digit) in values.enumerate() {
+        let domain = &mut domains[usize::from(roots[start + offset])];
+        *domain &= 1 << digit;
+        if *domain == 0 {
+            return 0.0;
+        }
+    }
+    compatible_fraction(rest, roots, &domains)
 }
 
 struct Components {
     parent: [u8; 64],
     size: [u8; 64],
-    domain: [u16; 64],
     joins: u8,
 }
 
@@ -79,24 +156,23 @@ impl Components {
         Self {
             parent: std::array::from_fn(|i| i as u8),
             size: [1; 64],
-            domain: [u16::MAX; 64],
             joins: 0,
         }
     }
 
-    fn root(&mut self, position: usize) -> usize {
-        let parent = usize::from(self.parent[position]);
-        if parent == position {
-            return position;
+    fn root(&mut self, position: usize) -> u8 {
+        let parent = self.parent[position];
+        if usize::from(parent) == position {
+            return parent;
         }
-        let root = self.root(parent);
-        self.parent[position] = root as u8;
+        let root = self.root(usize::from(parent));
+        self.parent[position] = root;
         root
     }
 
     fn join(&mut self, left: usize, right: usize) {
-        let mut left = self.root(left);
-        let mut right = self.root(right);
+        let mut left = usize::from(self.root(left));
+        let mut right = usize::from(self.root(right));
         if left == right {
             return;
         }
@@ -105,81 +181,63 @@ impl Components {
         }
         self.parent[right] = left as u8;
         self.size[left] += self.size[right];
-        self.domain[left] &= self.domain[right];
         self.joins += 1;
-    }
-
-    fn restrict(&mut self, position: usize, allowed: u16) {
-        let root = self.root(position);
-        self.domain[root] &= allowed;
-    }
-
-    fn bits(&self, len: usize) -> f64 {
-        let mut bits = 4.0 * f64::from(self.joins);
-        for i in 0..len {
-            let domain = self.domain[i];
-            if usize::from(self.parent[i]) == i && domain != u16::MAX {
-                debug_assert!(domain & 1 != 0, "the observed digits satisfy the patterns");
-                bits += 4.0 - f64::from(domain.count_ones()).log2();
-            }
-        }
-        bits
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::hash::digit;
 
     fn pattern(kind: Kind, start: usize, len: usize) -> Pattern {
-        Pattern {
-            kind,
-            start,
-            len,
-            fixed_bits: 0.0,
-            opportunities: 1,
-        }
+        Pattern::new(kind, start, len, 40, 0.0)
     }
 
     #[test]
     fn overlapping_equalities_are_counted_once() {
-        let digits: Vec<_> = b"325500005523"
-            .iter()
-            .map(|&byte| digit(byte).unwrap())
-            .collect();
         let palindrome = pattern(Kind::Palindrome, 0, 12);
         let center = pattern(Kind::Run, 4, 4);
-        let focused = pattern(Kind::FocusedRun, 4, 4);
         let left = pattern(Kind::Run, 2, 2);
         let right = pattern(Kind::Run, 8, 2);
+        let mut focused = center;
+        focused.run_domain = (1 << 0) | (1 << 5);
 
-        assert_eq!(fixed_bits(&digits, &[palindrome, center]), 28.0);
-        assert_eq!(fixed_bits(&digits, &[focused, palindrome]), 32.0);
-        assert_eq!(fixed_bits(&digits, &[palindrome, left, right]), 28.0);
+        assert_eq!(joint_bits(40, &[palindrome, center]), 28.0);
+        assert_eq!(joint_bits(40, &[focused, palindrome]), 31.0);
+        assert_eq!(joint_bits(40, &[palindrome, left, right]), 28.0);
     }
 
     #[test]
-    fn overlapping_sequences_intersect_non_wrapping_domains() {
-        let digits = [4, 5, 6, 7, 8, 9, 10];
-        let ascending = Kind::Sequence { ascending: true };
-        let first = pattern(ascending, 0, 6);
-        let second = pattern(ascending, 1, 6);
-        let bits = fixed_bits(&digits, &[first, second]);
-        assert!((bits - (28.0 - 10f64.log2())).abs() < 1e-12);
-
-        let digits = [10, 9, 8, 7, 6, 5, 4];
-        let descending = Kind::Sequence { ascending: false };
-        let first = pattern(descending, 0, 6);
-        let second = pattern(descending, 1, 6);
-        assert!((fixed_bits(&digits, &[second, first]) - bits).abs() < 1e-12);
+    fn overlapping_sequences_count_only_compatible_directions_and_values() {
+        let first = pattern(Kind::Sequence { ascending: true }, 0, 6);
+        let second = pattern(Kind::Sequence { ascending: true }, 1, 6);
+        let bits = joint_bits(40, &[first, second]);
+        assert!((bits - (28.0 - 20f64.log2())).abs() < 1e-12);
+        assert_eq!(joint_bits(40, &[second, first]), bits);
     }
 
     #[test]
-    fn border_uses_both_ends_when_testing_for_overlap() {
-        let digits = [1, 2, 3, 4, 1, 2, 3, 4];
+    fn overlapping_words_count_three_compatible_word_pairs() {
+        let left = pattern(Kind::Word, 0, 8);
+        let right = pattern(Kind::Word, 4, 8);
+        assert_eq!(translations(&[left, right]), 29);
+        assert!((joint_bits(40, &[left, right]) - (48.0 - 3f64.log2())).abs() < 1e-12);
+    }
+
+    #[test]
+    fn separate_words_count_each_pair_once() {
+        let left = pattern(Kind::Word, 0, 8);
+        let right = pattern(Kind::Word, 10, 8);
+        assert_eq!(disjoint_placements(40, left, right), 325);
+        assert_eq!(disjoint_placements(40, right, left), 325);
+    }
+
+    #[test]
+    fn border_anchors_overlap_and_uses_both_ends_for_disjoint_placements() {
         let border = pattern(Kind::Border, 0, 4);
-        let word = pattern(Kind::Word, 4, 4);
-        assert_eq!(fixed_bits(&digits, &[border, word]), 32.0);
+        let word = pattern(Kind::Word, 36, 4);
+        assert_eq!(translations(&[border, word]), 1);
+        assert_eq!(disjoint_placements(40, border, word), 29);
+        assert!((joint_bits(40, &[border, word]) - (32.0 - 11f64.log2())).abs() < 1e-12);
     }
 }

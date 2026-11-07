@@ -79,7 +79,8 @@ fn csv_keeps_all_matches_in_input_order_for_mixed_hash_lengths() {
             "composite",
             "hash",
             "primary",
-            "features"
+            "features",
+            "beauty_feature"
         ]
         .as_slice()
     );
@@ -88,6 +89,43 @@ fn csv_keeps_all_matches_in_input_order_for_mixed_hash_lengths() {
         .map(|row| row.unwrap()[4].to_owned())
         .collect();
     assert_eq!(hashes, [FIRST, long.as_str()]);
+}
+
+#[test]
+fn explain_and_csv_show_the_two_scoring_reasons() {
+    let hash = "d84a73bc621f325500005523d89b6e04deadbeef";
+    let output = binary().args(["--explain", hash]).output().unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout
+            .lines()
+            .any(|line| line.starts_with("Rarity pattern:") && line.contains("deadbeef"))
+    );
+    assert!(
+        stdout
+            .lines()
+            .any(|line| line.starts_with("Beauty pattern:") && line.contains("中心対称"))
+    );
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("findings.csv");
+    let output = run_stdin(binary().arg("--csv").arg(&path), hash.as_bytes());
+    assert!(output.status.success(), "{output:?}");
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout
+            .lines()
+            .any(|line| line.trim_start().starts_with("Beauty  ") && line.contains("中心対称"))
+    );
+    let row = csv::Reader::from_path(path)
+        .unwrap()
+        .records()
+        .next()
+        .unwrap()
+        .unwrap();
+    assert!(row[5].contains("deadbeef"));
+    assert!(row[7].contains("中心対称"));
 }
 
 #[test]

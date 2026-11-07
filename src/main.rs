@@ -102,18 +102,21 @@ fn explain(mut out: impl Write, hash: &ObjectId, scorer: &Scorer, weight: f64) -
     writeln!(out, "Beauty       : {} / 100 (heuristic)", result.beauty)?;
     let hybrid = result.bits() + f64::from(result.beauty) * weight;
     writeln!(out, "Hybrid       : {hybrid:.3} (weight={weight})")?;
-    writeln!(out, "Main feature : {}", result.primary(&text))?;
+    let primary = result.primary(&text);
+    writeln!(out, "Rarity pattern: {primary}")?;
+    if let Some(beauty) = result
+        .beauty_feature(&text)
+        .filter(|feature| feature != &primary)
+    {
+        writeln!(out, "Beauty pattern: {beauty}")?;
+    }
     if let Some(score) = result.local_score() {
-        let opportunities = f64::from(score.opportunities);
+        writeln!(out, "Fixed layout : {:.3} bits", score.fixed_bits)?;
         writeln!(
             out,
-            "Constraints  : {:.3} bits at fixed positions",
-            score.fixed_bits
-        )?;
-        writeln!(
-            out,
-            "Opportunities: {opportunities:.3} (log2={:.3})",
-            opportunities.log2()
+            "Placements   : {} (log2={:.3})",
+            score.placements,
+            f64::from(score.placements).log2()
         )?;
         writeln!(out, "Composite    : {}", result.composite())?;
     }
@@ -121,16 +124,16 @@ fn explain(mut out: impl Write, hash: &ObjectId, scorer: &Scorer, weight: f64) -
     features.sort_by(|a, b| b.bits().total_cmp(&a.bits()));
     writeln!(out, "\nDetected local features ({})", features.len())?;
     for feature in features {
-        writeln!(
-            out,
-            "  {:>7.2} bits  {}",
-            feature.bits(),
-            feature.label(&text)
-        )?;
+        let label = feature.label(&text, true);
+        if feature.center_only() {
+            writeln!(out, "  center-only  {label}")?;
+        } else {
+            writeln!(out, "  {:>7.2} bits  {label}", feature.bits())?;
+        }
     }
     writeln!(
         out,
-        "\nRarity estimates the occurrence of the reported pattern family."
+        "\nRarity uses a probability bound for the reported pattern family."
     )
 }
 
