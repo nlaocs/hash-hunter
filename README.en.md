@@ -37,7 +37,7 @@ hash-hunter --repo "path/to/repository" --sort rarity --min-bits 16 --csv findin
 
 With no `--repo` argument, Hash Hunter uses the repository in the current directory. It runs `git rev-list --all` to read commits reachable from local refs and HEAD.
 
-Progress goes to standard error. `Reading Git history` shows the number of hashes read and elapsed time. `Scoring` shows the percentage, processed count, elapsed time, and estimated time remaining (ETA). The total is unknown during history enumeration, so percentages start when scoring begins.
+Progress goes to standard error. `Reading Git history` shows the number of hashes read and elapsed time. `Scoring` shows the percentage, processed count, elapsed time, and estimated time remaining (ETA). Elapsed time keeps updating while waiting for input. The total is unknown during history enumeration, so percentages start when scoring begins.
 
 To obtain an exact total, Hash Hunter saves Git's hash list to a temporary file before scoring it. Git enumerates the history only once, and the temporary file is deleted when closed. A Linux history of about 1.5 million commits uses about 62 MB of temporary storage.
 

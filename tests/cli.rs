@@ -1,6 +1,9 @@
 use std::{
-    io::Write,
+    io::{BufRead, BufReader, Write},
     process::{Command, Output, Stdio},
+    sync::mpsc,
+    thread,
+    time::Duration,
 };
 
 const FIRST: &str = "d84a73bc621f325500005523d89b6e04f13a2cb8";
@@ -271,6 +274,40 @@ fn git_scan_reports_progress_with_a_known_total() {
             .any(|line| line.starts_with("Scoring ") && line.contains("100.0% (1/1)"))
     );
     assert!(!String::from_utf8(output.stdout).unwrap().contains("100.0%"));
+}
+
+#[test]
+fn progress_keeps_ticking_while_input_is_blocked() {
+    let mut child = binary()
+        .arg("--stdin")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let stderr = child.stderr.take().unwrap();
+    let (sender, receiver) = mpsc::channel();
+    let monitor = thread::spawn(move || {
+        for line in BufReader::new(stderr).lines() {
+            if sender.send(line.unwrap()).is_err() {
+                break;
+            }
+        }
+    });
+    let initial = receiver.recv_timeout(Duration::from_secs(10));
+    let heartbeat = receiver.recv_timeout(Duration::from_secs(3));
+    let mut stdin = child.stdin.take().unwrap();
+    writeln!(stdin, "{FIRST}").unwrap();
+    drop(stdin);
+    let status = child.wait().unwrap();
+    monitor.join().unwrap();
+
+    assert!(status.success());
+    assert!(initial.unwrap().starts_with("Scoring  0 hashes  "));
+    let heartbeat = heartbeat.expect("progress must update before input or EOF arrives");
+    assert!(heartbeat.starts_with("Scoring  0 hashes  "), "{heartbeat}");
+    assert!(!heartbeat.ends_with("0.0s"), "{heartbeat}");
+    assert!(!heartbeat.contains("100.0%"));
 }
 
 #[test]

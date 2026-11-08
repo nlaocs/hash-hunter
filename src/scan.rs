@@ -5,6 +5,12 @@ use std::{
     io::{self, BufRead, BufReader, IsTerminal, Read, Seek, Write},
     path::Path,
     process::{Command, Stdio},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering as AtomicOrdering},
+        mpsc::{self, RecvTimeoutError, Sender},
+    },
+    thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
 
@@ -23,41 +29,76 @@ const BATCH_BYTES: usize = 1 << 20;
 const MAX_LINE_BYTES: usize = 64 + 2;
 
 struct Progress {
+    completed: Arc<AtomicU64>,
+    stop: Sender<()>,
+    worker: Option<JoinHandle<ProgressDisplay>>,
+}
+
+impl Progress {
+    fn new(stage: &'static str, total: Option<u64>) -> io::Result<Self> {
+        let mut display = ProgressDisplay {
+            stage,
+            total,
+            started: Instant::now(),
+            terminal: io::stderr().is_terminal(),
+            line_width: 0,
+        };
+        display.report(0, false);
+        let completed = Arc::new(AtomicU64::new(0));
+        let count = Arc::clone(&completed);
+        let (stop, receiver) = mpsc::channel();
+        let worker = thread::Builder::new()
+            .name("progress".into())
+            .spawn(move || {
+                let interval = Duration::from_millis(if display.terminal { 250 } else { 1000 });
+                while matches!(
+                    receiver.recv_timeout(interval),
+                    Err(RecvTimeoutError::Timeout)
+                ) {
+                    display.report(count.load(AtomicOrdering::Relaxed), false);
+                }
+                display
+            })?;
+        Ok(Self {
+            completed,
+            stop,
+            worker: Some(worker),
+        })
+    }
+
+    fn update(&mut self, completed: u64) {
+        self.completed.store(completed, AtomicOrdering::Relaxed);
+    }
+
+    fn finish(&mut self, completed: u64) {
+        if let Some(mut display) = self.shutdown() {
+            display.total = Some(completed);
+            display.report(completed, true);
+        }
+    }
+
+    fn shutdown(&mut self) -> Option<ProgressDisplay> {
+        let worker = self.worker.take()?;
+        let _ = self.stop.send(());
+        worker.join().ok()
+    }
+}
+
+impl Drop for Progress {
+    fn drop(&mut self) {
+        self.shutdown();
+    }
+}
+
+struct ProgressDisplay {
     stage: &'static str,
     total: Option<u64>,
     started: Instant,
-    updated: Instant,
     terminal: bool,
     line_width: usize,
 }
 
-impl Progress {
-    fn new(stage: &'static str, total: Option<u64>) -> Self {
-        let now = Instant::now();
-        let mut progress = Self {
-            stage,
-            total,
-            started: now,
-            updated: now,
-            terminal: io::stderr().is_terminal(),
-            line_width: 0,
-        };
-        progress.report(0, false);
-        progress
-    }
-
-    fn update(&mut self, completed: u64) {
-        let interval = if self.terminal { 250 } else { 1000 };
-        if self.updated.elapsed() >= Duration::from_millis(interval) {
-            self.report(completed, false);
-        }
-    }
-
-    fn finish(&mut self, completed: u64) {
-        self.total = Some(completed);
-        self.report(completed, true);
-    }
-
+impl ProgressDisplay {
     fn report(&mut self, completed: u64, finished: bool) {
         let elapsed = self.started.elapsed().as_secs_f64();
         let status = if let Some(total) = self.total {
@@ -97,11 +138,10 @@ impl Progress {
             let _ = writeln!(out, "{status}");
         }
         let _ = out.flush();
-        self.updated = Instant::now();
     }
 }
 
-impl Drop for Progress {
+impl Drop for ProgressDisplay {
     fn drop(&mut self) {
         if self.line_width != 0 {
             let _ = writeln!(io::stderr().lock());
@@ -479,7 +519,7 @@ pub fn run(args: &Args, scorer: &Scorer) -> io::Result<Summary> {
     let (reader, total): (Box<dyn BufRead>, Option<u64>) = if args.stdin {
         (Box::new(io::stdin().lock()), None)
     } else {
-        let mut progress = Progress::new("Reading Git history", None);
+        let mut progress = Progress::new("Reading Git history", None)?;
         let mut command = Command::new("git");
         if let Some(path) = &args.repo {
             command.arg("-C").arg(path);
@@ -511,7 +551,7 @@ pub fn run(args: &Args, scorer: &Scorer) -> io::Result<Summary> {
         progress.finish(total);
         (Box::new(BufReader::new(file)), Some(total))
     };
-    let mut progress = Progress::new("Scoring", total);
+    let mut progress = Progress::new("Scoring", total)?;
     let summary = scan(reader, args, scorer, &pool, csv.as_mut(), &mut progress)?;
     if let (Some(csv), Some(path)) = (csv, &args.csv) {
         let temp = csv.into_inner().map_err(|error| error.into_error())?;
