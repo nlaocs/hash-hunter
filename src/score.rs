@@ -1,4 +1,4 @@
-use std::fmt::Write as _;
+use std::fmt;
 
 use crate::{
     constraints::{disjoint_placements, joint_bits, translations},
@@ -59,16 +59,45 @@ impl Candidate {
         }
     }
 
-    fn label(self, patterns: &[Pattern], text: &str, show_focus: bool) -> String {
-        let mut labels = self.ids[..self.count]
+    fn explanation(self, patterns: &[Pattern], text: &str, show_focus: bool) -> Explanation {
+        let parts = self.ids[..self.count]
             .iter()
             .map(|&id| patterns[id].label(text, show_focus))
-            .collect::<Vec<_>>()
-            .join(" + ");
-        if self.count > 1 {
-            write!(labels, " [{}]", self.relation.label()).expect("write to String");
+            .collect();
+        Explanation {
+            parts,
+            relation: (self.count > 1).then(|| self.relation.label()),
         }
-        labels
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct Explanation {
+    pub parts: Vec<String>,
+    pub relation: Option<&'static str>,
+}
+
+impl Explanation {
+    fn single(label: String) -> Self {
+        Self {
+            parts: vec![label],
+            relation: None,
+        }
+    }
+}
+
+impl fmt::Display for Explanation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for (index, part) in self.parts.iter().enumerate() {
+            if index != 0 {
+                f.write_str(" + ")?;
+            }
+            f.write_str(part)?;
+        }
+        if let Some(relation) = self.relation {
+            write!(f, " [{relation}]")?;
+        }
+        Ok(())
     }
 }
 
@@ -127,20 +156,45 @@ impl Assessment<'_> {
             .is_some_and(|score| score.candidate.count > 1)
     }
 
-    pub fn primary(&self, text: &str) -> String {
+    pub fn primary(&self, text: &str) -> Explanation {
         match self.winner {
-            Winner::Local(score) => score.candidate.label(self.patterns, text, true),
+            Winner::Local(score) => score.candidate.explanation(self.patterns, text, true),
             Winner::Frequency { value, count, .. } => {
-                format!("文字頻度:{}×{count}", char::from(HEX[value]))
+                Explanation::single(format!("文字頻度:{}×{count}", char::from(HEX[value])))
             }
-            Winner::AllDigits(_) => "数字のみ".into(),
-            Winner::AllLetters(_) => "a-fのみ".into(),
+            Winner::AllDigits(_) => Explanation::single("数字のみ".into()),
+            Winner::AllLetters(_) => Explanation::single("a-fのみ".into()),
         }
     }
 
-    pub fn beauty_feature(&self, text: &str) -> Option<String> {
+    pub fn beauty_feature(&self, text: &str) -> Option<Explanation> {
         self.visual
-            .map(|score| score.candidate.label(self.patterns, text, false))
+            .map(|score| score.candidate.explanation(self.patterns, text, false))
+    }
+
+    pub fn additional_features(&self, text: &str) -> Vec<String> {
+        let used = |index| {
+            self.local_score()
+                .is_some_and(|score| score.candidate.ids[..score.candidate.count].contains(&index))
+                || self.visual.is_some_and(|score| {
+                    score.candidate.ids[..score.candidate.count].contains(&index)
+                })
+        };
+        let selected: Vec<_> = self
+            .patterns
+            .iter()
+            .enumerate()
+            .filter(|&(index, _)| used(index))
+            .map(|(_, pattern)| pattern.label(text, true))
+            .collect();
+        let mut additional = Vec::new();
+        for pattern in self.patterns {
+            let label = pattern.label(text, true);
+            if !selected.contains(&label) && !additional.contains(&label) {
+                additional.push(label);
+            }
+        }
+        additional
     }
 
     pub fn details(&self, text: &str) -> String {
@@ -381,7 +435,12 @@ mod tests {
             let result = scorer.analyze(&hash, &mut patterns).unwrap();
             assert!((result.bits() - (fixed - 29f64.log2())).abs() < 1e-9);
             assert_eq!(result.beauty, beauty);
-            assert!(result.primary(&hash.to_string()).contains("中心対称"));
+            assert!(
+                result
+                    .primary(&hash.to_string())
+                    .to_string()
+                    .contains("中心対称")
+            );
             assert!(result.composite());
         }
     }
@@ -395,7 +454,7 @@ mod tests {
             let scorer = Scorer::new(focus.parse().unwrap());
             let result = scorer.analyze(&hash, &mut patterns).unwrap();
             assert!((result.bits() - (fixed - 30f64.log2())).abs() < 1e-9);
-            assert!(result.primary(&text).contains("ゾロ目:000"));
+            assert!(result.primary(&text).to_string().contains("ゾロ目:000"));
             assert_eq!(result.beauty, 90);
         }
         let isolated = hash_with("000", 10);
@@ -415,8 +474,14 @@ mod tests {
         assert_eq!(scorer.analyze(&plain, &mut patterns).unwrap().beauty, 94);
         let result = scorer.analyze(&with_word, &mut patterns).unwrap();
         assert_eq!(result.beauty, 94);
-        assert!(result.primary(&text).contains("deadbeef"));
-        assert!(result.beauty_feature(&text).unwrap().contains("中心対称"));
+        assert!(result.primary(&text).to_string().contains("deadbeef"));
+        assert!(
+            result
+                .beauty_feature(&text)
+                .unwrap()
+                .to_string()
+                .contains("中心対称")
+        );
     }
 
     #[test]
@@ -430,10 +495,22 @@ mod tests {
             assert_eq!(result.bits(), rarity);
             assert_eq!(result.beauty, 25);
             assert_eq!(
-                result.beauty_feature(&text).as_deref(),
-                Some("ゾロ目:33333")
+                result.beauty_feature(&text).unwrap().to_string(),
+                "ゾロ目:33333"
             );
         }
+    }
+
+    #[test]
+    fn details_skip_a_selected_visual_feature_with_a_focused_rarity_label() {
+        let hash = hash_with("a33333", 34);
+        let text = hash.to_string();
+        let scorer = Scorer::new("3".parse().unwrap());
+        let mut patterns = Vec::new();
+        let result = scorer.analyze(&hash, &mut patterns).unwrap();
+        assert_ne!(result.primary(&text), result.beauty_feature(&text).unwrap());
+        assert!(result.additional_features(&text).is_empty());
+        assert!(!result.details(&text).is_empty());
     }
 
     #[test]

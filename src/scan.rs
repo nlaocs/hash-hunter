@@ -1,10 +1,17 @@
 use std::{
     cmp::{Ordering, Reverse},
     collections::BinaryHeap,
-    io::{self, BufRead, BufReader, Read, Write},
+    fs::File,
+    io::{self, BufRead, BufReader, IsTerminal, Read, Seek, Write},
     path::Path,
     process::{Command, Stdio},
-    time::Duration,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering as AtomicOrdering},
+        mpsc::{self, RecvTimeoutError, Sender},
+    },
+    thread::{self, JoinHandle},
+    time::{Duration, Instant},
 };
 
 use clap::ValueEnum;
@@ -15,11 +22,132 @@ use crate::{
     Args,
     hash::{InvalidId, ObjectId},
     pattern::Pattern,
-    score::Scorer,
+    score::{Explanation, Scorer},
 };
 
 const BATCH_BYTES: usize = 1 << 20;
 const MAX_LINE_BYTES: usize = 64 + 2;
+
+struct Progress {
+    completed: Arc<AtomicU64>,
+    stop: Sender<()>,
+    worker: Option<JoinHandle<ProgressDisplay>>,
+}
+
+impl Progress {
+    fn new(stage: &'static str, total: Option<u64>) -> io::Result<Self> {
+        let mut display = ProgressDisplay {
+            stage,
+            total,
+            started: Instant::now(),
+            terminal: io::stderr().is_terminal(),
+            line_width: 0,
+        };
+        display.report(0, false);
+        let completed = Arc::new(AtomicU64::new(0));
+        let count = Arc::clone(&completed);
+        let (stop, receiver) = mpsc::channel();
+        let worker = thread::Builder::new()
+            .name("progress".into())
+            .spawn(move || {
+                let interval = Duration::from_millis(if display.terminal { 250 } else { 1000 });
+                while matches!(
+                    receiver.recv_timeout(interval),
+                    Err(RecvTimeoutError::Timeout)
+                ) {
+                    display.report(count.load(AtomicOrdering::Relaxed), false);
+                }
+                display
+            })?;
+        Ok(Self {
+            completed,
+            stop,
+            worker: Some(worker),
+        })
+    }
+
+    fn update(&mut self, completed: u64) {
+        self.completed.store(completed, AtomicOrdering::Relaxed);
+    }
+
+    fn finish(&mut self, completed: u64) {
+        if let Some(mut display) = self.shutdown() {
+            display.total = Some(completed);
+            display.report(completed, true);
+        }
+    }
+
+    fn shutdown(&mut self) -> Option<ProgressDisplay> {
+        let worker = self.worker.take()?;
+        let _ = self.stop.send(());
+        worker.join().ok()
+    }
+}
+
+impl Drop for Progress {
+    fn drop(&mut self) {
+        self.shutdown();
+    }
+}
+
+struct ProgressDisplay {
+    stage: &'static str,
+    total: Option<u64>,
+    started: Instant,
+    terminal: bool,
+    line_width: usize,
+}
+
+impl ProgressDisplay {
+    fn report(&mut self, completed: u64, finished: bool) {
+        let elapsed = self.started.elapsed().as_secs_f64();
+        let status = if let Some(total) = self.total {
+            let percent = if finished {
+                100.0
+            } else if total == 0 {
+                0.0
+            } else {
+                (100.0 * completed as f64 / total as f64).min(99.9)
+            };
+            let remaining = total.saturating_sub(completed);
+            let eta = if finished {
+                "0.0s".into()
+            } else if completed == 0 {
+                "--".into()
+            } else {
+                format!("{:.1}s", elapsed * remaining as f64 / completed as f64)
+            };
+            format!(
+                "{} {percent:5.1}% ({completed}/{total})  {elapsed:.1}s  ETA {eta}",
+                self.stage
+            )
+        } else {
+            format!("{}  {completed} hashes  {elapsed:.1}s", self.stage)
+        };
+        let mut out = io::stderr().lock();
+        // Progress output must not stop a scan if stderr has been closed.
+        if self.terminal {
+            let width = self.line_width.max(status.len());
+            let _ = write!(out, "\r{status:width$}");
+            self.line_width = width;
+            if finished {
+                let _ = writeln!(out);
+                self.line_width = 0;
+            }
+        } else {
+            let _ = writeln!(out, "{status}");
+        }
+        let _ = out.flush();
+    }
+}
+
+impl Drop for ProgressDisplay {
+    fn drop(&mut self) {
+        if self.line_width != 0 {
+            let _ = writeln!(io::stderr().lock());
+        }
+    }
+}
 
 #[derive(Clone, Copy, ValueEnum)]
 pub enum SortBy {
@@ -34,6 +162,41 @@ impl SortBy {
             Self::Rarity => bits,
             Self::Beauty => f64::from(beauty),
             Self::Hybrid => bits + f64::from(beauty) * weight,
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum Column {
+    Score,
+    Bits,
+    Beauty,
+    Expected,
+    Hash,
+    Pattern,
+}
+
+impl Column {
+    fn heading(self) -> &'static str {
+        match self {
+            Self::Score => "Score",
+            Self::Bits => "Bits",
+            Self::Beauty => "Beauty",
+            Self::Expected => "Expected",
+            Self::Hash => "Hash",
+            Self::Pattern => "Pattern",
+        }
+    }
+
+    fn value(self, finding: &Finding, counts: &Counts) -> String {
+        let key = finding.key;
+        match self {
+            Self::Score => format!("{:.2}", key.rank),
+            Self::Bits => format!("{:.2}", key.bits),
+            Self::Beauty => key.beauty.to_string(),
+            Self::Expected => format_expected(counts.expected(key)),
+            Self::Hash => key.hash.to_string(),
+            Self::Pattern => finding.primary.parts.join(" + "),
         }
     }
 }
@@ -59,9 +222,10 @@ impl Key {
 struct Finding {
     key: Key,
     composite: bool,
-    primary: String,
+    primary: Explanation,
     features: String,
-    beauty_feature: Option<String>,
+    beauty_feature: Option<Explanation>,
+    additional_features: Vec<String>,
 }
 
 impl Ord for Finding {
@@ -90,6 +254,12 @@ impl Finding {
         let bits = format!("{:.4}", self.key.bits);
         let beauty = self.key.beauty.to_string();
         let hash = self.key.hash.to_string();
+        let primary = self.primary.to_string();
+        let beauty_feature = self
+            .beauty_feature
+            .as_ref()
+            .map(ToString::to_string)
+            .unwrap_or_default();
         writer
             .write_record([
                 rank.as_str(),
@@ -97,9 +267,9 @@ impl Finding {
                 &beauty,
                 if self.composite { "true" } else { "false" },
                 &hash,
-                &self.primary,
+                &primary,
                 &self.features,
-                self.beauty_feature.as_deref().unwrap_or(""),
+                &beauty_feature,
             ])
             .map_err(io::Error::other)
     }
@@ -180,10 +350,15 @@ impl Worker {
                 composite,
                 primary: result.primary(&text),
                 beauty_feature: result.beauty_feature(&text),
-                features: if save_csv || args.details {
+                features: if save_csv {
                     result.details(&text)
                 } else {
                     String::new()
+                },
+                additional_features: if args.details {
+                    result.additional_features(&text)
+                } else {
+                    Vec::new()
                 },
             });
         }
@@ -221,38 +396,117 @@ impl Summary {
         if args.focus_digits.count() != 0 {
             writeln!(out, "Focus digits        : {}", args.focus_digits)?;
         }
-        writeln!(
-            out,
-            "\n{:>7} {:>7} {:>6} {:>10}  {:<40}  Rarity pattern",
-            "Rank", "Bits", "Beauty", "Expected", "Hash"
-        )?;
-        for Reverse(finding) in self.top.into_sorted_vec() {
-            let key = finding.key;
-            let expected = format_expected(self.counts.expected(key));
-            let marker = if finding.composite { "[C] " } else { "" };
-            writeln!(
-                out,
-                "{:>7.2} {:>7.2} {:>6} {expected:>10}  {}  {marker}{}",
-                key.rank, key.bits, key.beauty, key.hash, finding.primary
-            )?;
-            if let Some(beauty) = finding
-                .beauty_feature
-                .as_deref()
-                .filter(|&feature| feature != finding.primary)
-            {
-                writeln!(out, "    Beauty  {beauty}")?;
+        if self.top.is_empty() {
+            writeln!(out, "\nNo matching hashes.")?;
+        }
+        let findings = self.top.into_sorted_vec();
+        if args.details {
+            for (index, Reverse(finding)) in findings.into_iter().enumerate() {
+                let key = finding.key;
+                let expected = format_expected(self.counts.expected(key));
+                writeln!(out, "\n#{}  {}", index + 1, key.hash)?;
+                writeln!(
+                    out,
+                    "    Score {:.2}   Rarity {:.2} bits   Beauty {}/100",
+                    key.rank, key.bits, key.beauty
+                )?;
+                writeln!(out, "    Expected {expected} hits")?;
+                write_explanation(&mut out, "Rarity", &finding.primary)?;
+                if let Some(beauty) = finding
+                    .beauty_feature
+                    .as_ref()
+                    .filter(|&feature| feature != &finding.primary)
+                {
+                    write_explanation(&mut out, "Beauty", beauty)?;
+                }
+                if !finding.additional_features.is_empty() {
+                    writeln!(out, "    Other")?;
+                    for feature in finding.additional_features {
+                        writeln!(out, "      - {feature}")?;
+                    }
+                }
             }
-            if args.details && !finding.features.is_empty() {
-                writeln!(out, "    └─ {}", finding.features)?;
-            }
+        } else if !findings.is_empty() {
+            write_table(&mut out, &findings, &self.counts, &args.columns)?;
         }
         if let Some(path) = &args.csv {
             writeln!(out, "\nCSV saved to {}", path.display())?;
         }
-        writeln!(
-            out,
-            "\nExpected gives an approximate upper bound for the reported family among hashes of the same length."
-        )
+        if args.details || args.columns.contains(&Column::Expected) {
+            writeln!(
+                out,
+                "\nExpected is a bound for the shown pattern family.\nIt uses the number of scanned hashes of the same length."
+            )?;
+        }
+        Ok(())
+    }
+}
+
+fn write_table(
+    mut out: impl Write,
+    findings: &[Reverse<Finding>],
+    counts: &Counts,
+    columns: &[Column],
+) -> io::Result<()> {
+    let rows: Vec<Vec<String>> = findings
+        .iter()
+        .map(|Reverse(finding)| {
+            columns
+                .iter()
+                .map(|column| column.value(finding, counts))
+                .collect()
+        })
+        .collect();
+    let header: Vec<String> = columns
+        .iter()
+        .map(|column| column.heading().into())
+        .collect();
+    let widths: Vec<_> = columns
+        .iter()
+        .enumerate()
+        .map(|(index, column)| {
+            if *column == Column::Pattern {
+                0
+            } else {
+                rows.iter()
+                    .map(|row| row[index].len())
+                    .max()
+                    .unwrap_or(0)
+                    .max(header[index].len())
+            }
+        })
+        .collect();
+    writeln!(out)?;
+    for row in std::iter::once(header).chain(rows) {
+        for (index, value) in row.iter().enumerate() {
+            if index != 0 {
+                write!(out, "  ")?;
+            }
+            let width = widths[index];
+            if columns[index] == Column::Hash {
+                write!(out, "{value:<width$}")?;
+            } else {
+                write!(out, "{value:>width$}")?;
+            }
+        }
+        writeln!(out)?;
+    }
+    Ok(())
+}
+
+fn write_explanation(
+    mut out: impl Write,
+    title: &str,
+    explanation: &Explanation,
+) -> io::Result<()> {
+    if let Some(relation) = explanation.relation {
+        writeln!(out, "    {title} ({relation})")?;
+        for part in &explanation.parts {
+            writeln!(out, "      - {part}")?;
+        }
+        Ok(())
+    } else {
+        writeln!(out, "    {title}  {}", explanation.parts[0])
     }
 }
 
@@ -262,9 +516,10 @@ pub fn run(args: &Args, scorer: &Scorer) -> io::Result<Summary> {
         .build()
         .map_err(io::Error::other)?;
     let mut csv = args.csv.as_deref().map(open_csv).transpose()?;
-    let summary = if args.stdin {
-        scan(io::stdin().lock(), args, scorer, &pool, csv.as_mut())?
+    let (reader, total): (Box<dyn BufRead>, Option<u64>) = if args.stdin {
+        (Box::new(io::stdin().lock()), None)
     } else {
+        let mut progress = Progress::new("Reading Git history", None)?;
         let mut command = Command::new("git");
         if let Some(path) = &args.repo {
             command.arg("-C").arg(path);
@@ -283,23 +538,47 @@ pub fn run(args: &Args, scorer: &Scorer) -> io::Result<Summary> {
                 )
             })?;
         let reader = BufReader::new(git.stdout.take().expect("piped Git stdout"));
-        let result = scan(reader, args, scorer, &pool, csv.as_mut());
+        let result = snapshot(reader, |count| progress.update(count));
         if result.is_err() {
             let _ = git.kill();
         }
         let status = git.wait();
-        let summary = result?;
+        let (file, total) = result?;
         let status = status?;
         if !status.success() {
             return Err(io::Error::other(format!("git rev-list failed: {status}")));
         }
-        summary
+        progress.finish(total);
+        (Box::new(BufReader::new(file)), Some(total))
     };
+    let mut progress = Progress::new("Scoring", total)?;
+    let summary = scan(reader, args, scorer, &pool, csv.as_mut(), &mut progress)?;
     if let (Some(csv), Some(path)) = (csv, &args.csv) {
         let temp = csv.into_inner().map_err(|error| error.into_error())?;
         temp.persist(path).map_err(|error| error.error)?;
     }
+    progress.finish(summary.counts.scanned);
     Ok(summary)
+}
+
+fn snapshot(mut reader: impl BufRead, mut report: impl FnMut(u64)) -> io::Result<(File, u64)> {
+    let mut file = tempfile::tempfile()?;
+    let mut batch = Vec::with_capacity(BATCH_BYTES + MAX_LINE_BYTES + 1);
+    let mut total = 0;
+    let mut unterminated = false;
+    loop {
+        read_batch(&mut reader, &mut batch)?;
+        if batch.is_empty() {
+            break;
+        }
+        total += batch.iter().filter(|&&byte| byte == b'\n').count() as u64;
+        unterminated = !batch.ends_with(b"\n");
+        file.write_all(&batch)?;
+        report(total);
+    }
+    total += u64::from(unterminated);
+    file.rewind()?;
+    Ok((file, total))
 }
 
 fn open_csv(path: &Path) -> io::Result<csv::Writer<NamedTempFile>> {
@@ -337,6 +616,7 @@ fn scan(
     scorer: &Scorer,
     pool: &ThreadPool,
     mut csv: Option<&mut csv::Writer<NamedTempFile>>,
+    progress: &mut Progress,
 ) -> io::Result<Summary> {
     let mut summary = Summary {
         counts: Counts::default(),
@@ -390,6 +670,7 @@ fn scan(
                 }
             }
         }
+        progress.update(summary.counts.scanned);
     }
     Ok(summary)
 }
@@ -425,4 +706,28 @@ fn split_batch(mut batch: &[u8], parts: usize) -> Vec<&[u8]> {
         chunks.push(batch);
     }
     chunks
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    #[test]
+    fn snapshot_preserves_line_endings_and_counts_a_final_unterminated_hash() {
+        let short = "d84a73bc621f325500005523d89b6e04f13a2cb8";
+        let long = "0123456789abcdef".repeat(4);
+        for input in [
+            String::new(),
+            format!("{short}\r\n{long}"),
+            format!("{}{long}", format!("{short}\n").repeat(30_000)),
+        ] {
+            let expected = input.lines().count() as u64;
+            let (mut file, count) = snapshot(Cursor::new(input.as_bytes()), |_| {}).unwrap();
+            let mut copied = String::new();
+            file.read_to_string(&mut copied).unwrap();
+            assert_eq!(copied, input);
+            assert_eq!(count, expected);
+        }
+    }
 }

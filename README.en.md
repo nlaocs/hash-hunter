@@ -2,7 +2,7 @@
 
 Hash Hunter is a CLI for finding palindromes, runs, and repeats in Git commit hashes. It supports SHA-1 and SHA-256 and ranks hashes by rarity, visual structure, or both.
 
-[![Version 0.1.0](https://img.shields.io/badge/version-0.1.0-2563eb)](Cargo.toml) [![Rust 2024](https://img.shields.io/badge/Rust-2024-24292f?logo=rust&logoColor=white)](Cargo.toml) [![MIT License](https://img.shields.io/badge/license-MIT-15803d)](LICENSE)
+[![Version 0.2.0](https://img.shields.io/badge/version-0.2.0-2563eb)](Cargo.toml) [![Rust 2024](https://img.shields.io/badge/Rust-2024-24292f?logo=rust&logoColor=white)](Cargo.toml) [![MIT License](https://img.shields.io/badge/license-MIT-15803d)](LICENSE)
 
 [Features](#features) · [Installation](#installation) · [Usage](#usage) · [Scoring](#scoring) · [Development](#development) · [License](#license)
 
@@ -31,11 +31,44 @@ cargo install --path . --locked
 ### Scan Git history
 
 ```sh
-hash-hunter --repo "path/to/repository" --top 100 --details
+hash-hunter --repo "path/to/repository" --top 100
 hash-hunter --repo "path/to/repository" --sort rarity --min-bits 16 --csv findings.csv
 ```
 
 With no `--repo` argument, Hash Hunter uses the repository in the current directory. It runs `git rev-list --all` to read commits reachable from local refs and HEAD.
+
+Progress goes to standard error. `Reading Git history` shows the number of hashes read and elapsed time. `Scoring` shows the percentage, processed count, elapsed time, and estimated time remaining (ETA). Elapsed time keeps updating while waiting for input. The total is unknown during history enumeration, so percentages start when scoring begins.
+
+To obtain an exact total, Hash Hunter saves Git's hash list to a temporary file before scoring it. Git enumerates the history only once, and the temporary file is deleted when closed. A Linux history of about 1.5 million commits uses about 62 MB of temporary storage.
+
+The default list uses one line per hash, showing the score, hash, and primary pattern. Beauty reasons and additional features do not interrupt the list. This excerpt comes from a scan of the Linux history.
+
+```text
+Score  Hash                                      Pattern
+40.38  23b6ee5cd9d99d9d99d92ff923d6971a33dc7b03  周期5:d9d99d9d99d9 + 回文:9d99d9d99d9
+38.92  5f5837d2d650db25b9153b91535e67a96b265f58  周期5:b9153b9153 + 先頭=末尾:5f58
+```
+
+Use `--columns` to select and order fields. Choose from `score`, `bits`, `beauty`, `expected`, `hash`, and `pattern`, separated by commas. Column selection does not change scoring or ranking.
+
+```sh
+hash-hunter --repo "path/to/repository" --columns score,hash
+hash-hunter --repo "path/to/repository" --columns score,bits,beauty,expected,hash,pattern
+hash-hunter --repo "path/to/repository" --details
+```
+
+`--details` groups scores and full reasons for each hash across multiple lines. Composite patterns appear on separate lines, followed by features not already shown in either scoring reason. It cannot be combined with `--columns`.
+
+```text
+#1  23b6ee5cd9d99d9d99d92ff923d6971a33dc7b03
+    Score 40.38   Rarity 31.14 bits   Beauty 77/100
+    Expected 0.000635 hits
+    Rarity (入れ子の複合)
+      - 周期5:d9d99d9d99d9
+      - 回文:9d99d9d99d9
+    Other
+      - 回文:d9d99d9d
+```
 
 CSV rows follow input order and use UTF-8 with a BOM. If the destination exists, Hash Hunter replaces it after the scan and write succeed.
 
@@ -46,6 +79,8 @@ Pass one lowercase 40- or 64-digit hexadecimal hash per line to `--stdin`. Both 
 ```powershell
 Get-Content .\hashes.txt | hash-hunter --stdin --threads 8
 ```
+
+`--stdin` scores hashes as it reads them and shows the processed count and elapsed time. Since the total is unknown, it displays 100% only on completion.
 
 ### Explain one score
 
@@ -78,7 +113,8 @@ The hash contains the palindrome `325500005523`. The palindrome contributes 24 b
 | `--sort MODE` | Rank by `rarity`, `beauty`, or `hybrid` | `hybrid` |
 | `--beauty-weight X` | Beauty coefficient in the Hybrid score | 0.12 |
 | `--focus-digits HEX` | Score runs of selected digits as a separate pattern family | None |
-| `--details` | Show additional candidates for top results | — |
+| `--columns FIELDS` | Select and order list fields, separated by commas | `score,hash,pattern` |
+| `--details` | Show scores, reasons, and additional features across multiple lines | — |
 | `--csv PATH` | Save all matches that meet the threshold | — |
 | `--help` / `--version` | Show help or the version | — |
 
@@ -95,7 +131,7 @@ To try different scoring options on the same history, save the output of `git re
 ## Scoring
 
 - **Rarity** is `-log2(q)` bits, where `q` is an upper bound on a pattern family's occurrence probability. The calculation assumes independent uniform hex digits. For separate pairs, it counts disjoint placements, with each pair of locations counted once if both patterns belong to the same family. For overlaps, it fixes the relative layout and counts compatible combinations of words and sequences.
-- **Beauty** scores length, symmetry, and other visual properties on a scale of 0 to 100. Overlapping features of the same kind count as one visual motif. Rarity and Beauty each select their highest-scoring candidate. The terminal shows both reasons when they differ. In CSV, `primary` gives the Rarity reason and `beauty_feature` gives the Beauty reason. `composite` indicates whether the Rarity reason combines patterns.
+- **Beauty** scores length, symmetry, and other visual properties on a scale of 0 to 100. Overlapping features of the same kind count as one visual motif. Rarity and Beauty each select their highest-scoring candidate. `--details` and `--explain` show both reasons when they differ. In CSV, `primary` gives the Rarity reason and `beauty_feature` gives the Beauty reason. `composite` indicates whether the Rarity reason combines patterns.
 - **Hybrid** is `Rarity + beauty-weight × Beauty`. Ranking ties go to the higher Rarity, then higher Beauty, then the lexicographically greater hash.
 - **Expected** is an upper bound on the expected number of matches for the displayed family. It multiplies `2^(-Rarity)` by the number of scanned hashes of the same length. The display uses decimals and shows values below one millionth as `<0.000001`.
 

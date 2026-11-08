@@ -16,7 +16,7 @@ use clap::Parser;
 
 use crate::{
     hash::{FocusDigits, ObjectId},
-    scan::SortBy,
+    scan::{Column, SortBy},
     score::Scorer,
 };
 
@@ -63,7 +63,11 @@ struct Args {
     #[arg(long, value_name = "PATH")]
     csv: Option<PathBuf>,
 
-    /// Show additional detected features for each ranked result
+    /// Columns to show in the one-line list, in the given order
+    #[arg(long, value_enum, value_delimiter = ',', default_value = "score,hash,pattern", value_name = "FIELDS", conflicts_with_all = ["details", "explain"])]
+    columns: Vec<Column>,
+
+    /// Show detailed multi-line scores, reasons, and additional features
     #[arg(long)]
     details: bool,
 }
